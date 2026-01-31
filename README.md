@@ -31,6 +31,8 @@ sudo apt install -y \
     libssl-dev \
     libsecret-1-dev \
     libclang-dev \
+    libasound2-dev \
+    libxdo-dev \
     cmake \
     ffmpeg
 

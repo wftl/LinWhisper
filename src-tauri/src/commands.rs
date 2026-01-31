@@ -42,14 +42,13 @@ pub async fn stop_recording(
 
     update_tray_icon(&app_handle, RecordingStatus::Processing).map_err(|e| e.to_string())?;
 
-    let result = state.stop_recording().await.map_err(|e| e.to_string())?;
+    let result = state.stop_recording().await;
 
-    update_tray_icon(&app_handle, RecordingStatus::Ready).map_err(|e| e.to_string())?;
-    update_tray_menu(&app_handle, &state)
-        .await
-        .map_err(|e| e.to_string())?;
+    // We need to update tray here to match the reset to Ready state, because GUI button path doesn't emit events (frontend handles its own error).
+    let _ = update_tray_icon(&app_handle, state.status);
+    let _ = update_tray_menu(&app_handle, &state).await;
 
-    Ok(result)
+    result.map_err(|e| e.to_string())
 }
 
 /// Get current recording status

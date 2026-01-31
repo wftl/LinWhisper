@@ -235,6 +235,16 @@ impl AppState {
         let samples = crate::audio::stop_recording(&self.recording_handle)?;
         self.status = RecordingStatus::Processing;
 
+        // Helper to reset status on error
+        let result = self.process_recording(samples).await;
+        if result.is_err() {
+            self.status = RecordingStatus::Ready;
+        }
+        result
+    }
+
+    /// Internal: process recorded samples (transcribe, AI, save history)
+    async fn process_recording(&mut self, samples: Vec<f32>) -> Result<String> {
         // Get active mode
         let mode = self
             .get_active_mode()
