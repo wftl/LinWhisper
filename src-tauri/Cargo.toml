@@ -68,7 +68,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 
 # HTTP client for cloud providers (using rustls to avoid OpenSSL dependency)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 
 # Secret storage
 keyring = "2"

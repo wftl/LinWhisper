@@ -3,6 +3,8 @@
 use crate::error::{AppError, Result};
 use crate::modes::SttProvider as SttProviderType;
 use async_trait::async_trait;
+use reqwest::multipart;
+use serde::Deserialize;
 use std::path::PathBuf;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -90,6 +92,116 @@ impl SttProvider for WhisperCppProvider {
     }
 }
 
+/// STT provider for self-hosted whisper servers
+/// (e.g., Speaches, faster-whisper-server, LocalAI)
+///
+/// Uses the OpenAI-compatible /v1/audio/transcriptions API format.
+pub struct SelfHostedWhisperSttProvider {
+    base_url: String,
+    model: String,
+}
+
+impl SelfHostedWhisperSttProvider {
+    /// Create a new self-hosted whisper STT provider
+    ///
+    /// Reads base URL from WHISPER_API_URL env var.
+    /// Example: WHISPER_API_URL=http://192.168.1.100:8000
+    pub fn new(model: String) -> Self {
+        let base_url = std::env::var("WHISPER_API_URL")
+            .unwrap_or_else(|_| "http://localhost:8000".to_string());
+
+        Self { base_url, model }
+    }
+}
+
+/// Response format from OpenAI-compatible transcription API
+#[derive(Deserialize)]
+struct WhisperTranscriptionResponse {
+    text: String,
+}
+
+#[async_trait]
+impl SttProvider for SelfHostedWhisperSttProvider {
+    async fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String> {
+        // Convert f32 samples to WAV bytes
+        let wav_data = samples_to_wav(samples)?;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/audio/transcriptions", self.base_url);
+
+        // Build multipart form
+        let file_part = multipart::Part::bytes(wav_data)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| AppError::Transcription(format!("Failed to create multipart: {}", e)))?;
+
+        let mut form = multipart::Form::new()
+            .part("file", file_part)
+            .text("model", self.model.clone());
+
+        if let Some(lang) = language {
+            form = form.text("language", lang.to_string());
+        }
+
+        let response = client
+            .post(&url)
+            .multipart(form)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| AppError::Transcription(format!("Request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::Transcription(format!(
+                "API error ({}): {}",
+                status, body
+            )));
+        }
+
+        let result: WhisperTranscriptionResponse = response
+            .json()
+            .await
+            .map_err(|e| AppError::Transcription(format!("Failed to parse response: {}", e)))?;
+
+        Ok(result.text.trim().to_string())
+    }
+
+    fn name(&self) -> &str {
+        "Self-hosted Whisper"
+    }
+}
+
+/// Convert f32 audio samples to WAV format bytes
+fn samples_to_wav(samples: &[f32]) -> Result<Vec<u8>> {
+    use std::io::Cursor;
+
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut writer = hound::WavWriter::new(&mut cursor, spec)
+            .map_err(|e| AppError::Transcription(format!("Failed to create WAV writer: {}", e)))?;
+
+        for &sample in samples {
+            let amplitude = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+            writer.write_sample(amplitude)
+                .map_err(|e| AppError::Transcription(format!("Failed to write sample: {}", e)))?;
+        }
+
+        writer.finalize()
+            .map_err(|e| AppError::Transcription(format!("Failed to finalize WAV: {}", e)))?;
+    }
+
+    Ok(cursor.into_inner())
+}
+
 /// Get the default models directory
 pub fn get_models_dir() -> Result<PathBuf> {
     let data_dir = directories::ProjectDirs::from("com", "whispertray", "WhisperTray")
@@ -158,7 +270,10 @@ pub async fn create_stt_provider(
             Err(AppError::Provider("Deepgram not yet implemented".to_string()))
         }
         SttProviderType::OpenAI => {
-            Err(AppError::Provider("OpenAI STT not yet implemented".to_string()))
+            // For self-hosted whisper servers (Speaches, faster-whisper-server, etc.)
+            // Set WHISPER_API_URL env var to point to your server
+            let provider = SelfHostedWhisperSttProvider::new(model.to_string());
+            Ok(Box::new(provider))
         }
         SttProviderType::Custom(name) => {
             Err(AppError::Provider(format!("Unknown provider: {}", name)))
