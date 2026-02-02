@@ -11,7 +11,7 @@ A local-first, tray-based dictation tool for Linux with optional AI post-process
   - 🔴 Red: Recording in progress
   - 🔵 Blue: Processing
   - 🟢 Green: Ready
-- **Local-First**: All transcription happens locally using whisper.cpp by default
+- **Local-First**: Transcription happens locally using whisper.cpp by default, with optional offload to a self-hosted GPU server
 - **Multiple Modes**: Built-in modes for different use cases (message, email, notes, meeting summaries)
 - **AI Post-Processing**: Optional LLM processing to transform transcripts
 - **History**: Full history with search, reprocessing, and export capabilities
@@ -31,6 +31,8 @@ sudo apt install -y \
     libssl-dev \
     libsecret-1-dev \
     libclang-dev \
+    libasound2-dev \
+    libxdo-dev \
     cmake \
     ffmpeg
 
@@ -174,12 +176,42 @@ API keys for cloud providers (OpenAI, Anthropic) are stored securely in your sys
 ### Environment Variables
 
 ```bash
-# Override Ollama URL
+# Override Ollama URL (for LLM post-processing)
 export OLLAMA_HOST=http://localhost:11434
 
 # Enable debug logging
 export RUST_LOG=whispertray=debug
 ```
+
+### Self-Hosted GPU Transcription
+
+You can offload transcription to a self-hosted whisper server running on a machine with a GPU. This is useful if your laptop lacks GPU acceleration but you have a desktop with a capable GPU on your network.
+
+**Supported servers** (any OpenAI-compatible `/v1/audio/transcriptions` endpoint):
+- [Speaches](https://speaches.ai/) (recommended)
+- [faster-whisper-server](https://github.com/fedirz/faster-whisper-server)
+- [LocalAI](https://localai.io/)
+
+**Setup for WhisperTray (further config required for your GPU server):**
+
+1. Run a whisper server on your GPU machine:
+   ```bash
+   # Example with Speaches (Docker)
+   docker run --rm --detach --publish 8000:8000 --name speaches \
+     --volume hf-hub-cache:/home/ubuntu/.cache/huggingface/hub \
+     --gpus=all ghcr.io/speaches-ai/speaches:latest-cuda
+   ```
+
+2. In WhisperTray Settings:
+   - Select **"Self-hosted Whisper Server"** as the STT provider
+   - Enter your server URL (e.g., `http://192.168.1.100:8000`)
+   - Click **Test** to verify the connection
+   - Enter a model name supported by your server (e.g., `distil-whisper/distil-large-v3.5-ct2`)
+
+### Cloud STT Providers
+
+- **OpenAI Cloud**: Requires an OpenAI API key (add in Settings under API Keys). Uses OpenAI's cloud-based Whisper API.
+- **Deepgram**: Not yet implemented.
 
 ## Wayland vs X11
 

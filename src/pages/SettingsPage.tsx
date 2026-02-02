@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../stores/appStore";
 import * as api from "../lib/api";
 
@@ -16,6 +17,8 @@ export default function SettingsPage() {
     anthropic: false,
   });
   const [saving, setSaving] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<"idle" | "success" | "error">("idle");
 
   useEffect(() => {
     if (settings) {
@@ -57,6 +60,23 @@ export default function SettingsPage() {
     if (confirm(`Delete ${provider} API key?`)) {
       await deleteApiKey(provider);
       setHasKeys((prev) => ({ ...prev, [provider]: false }));
+    }
+  };
+
+  const handleTestConnection = async () => {
+    const url = localSettings?.whisper_server_url;
+    if (!url) return;
+
+    setTestingConnection(true);
+    setConnectionStatus("idle");
+
+    try {
+      const success = await invoke<boolean>("test_whisper_connection", { url });
+      setConnectionStatus(success ? "success" : "error");
+    } catch {
+      setConnectionStatus("error");
+    } finally {
+      setTestingConnection(false);
     }
   };
 
@@ -140,33 +160,109 @@ export default function SettingsPage() {
               className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
             >
               <option value="whispercpp">whisper.cpp (Local)</option>
-              <option value="openai">OpenAI Whisper API</option>
+              <option value="whisperserver">Self-hosted Whisper Server</option>
+              <option value="openai">OpenAI Cloud</option>
               <option value="deepgram">Deepgram</option>
             </select>
           </div>
+
+          {/* Whisper Server URL - shown when whisperserver is selected */}
+          {localSettings.default_stt_provider === "whisperserver" && (
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                Whisper Server URL
+                {connectionStatus === "success" && (
+                  <span className="ml-2 text-green-400 text-xs">✓ Connected</span>
+                )}
+                {connectionStatus === "error" && (
+                  <span className="ml-2 text-red-400 text-xs">✗ Connection failed</span>
+                )}
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={localSettings.whisper_server_url || ""}
+                  onChange={(e) => {
+                    setLocalSettings({
+                      ...localSettings,
+                      whisper_server_url: e.target.value || undefined,
+                    });
+                    setConnectionStatus("idle");
+                  }}
+                  placeholder="http://192.168.1.100:8000"
+                  className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+                />
+                <button
+                  onClick={handleTestConnection}
+                  disabled={testingConnection || !localSettings.whisper_server_url}
+                  className="px-3 py-2 bg-gray-600 text-white rounded-lg text-sm hover:bg-gray-500 disabled:opacity-50"
+                >
+                  {testingConnection ? "Testing..." : "Test"}
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                URL of your self-hosted whisper server (Speaches, faster-whisper-server, etc.)
+              </p>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1">
               Default Model
             </label>
-            <select
-              value={localSettings.default_stt_model}
-              onChange={(e) =>
-                setLocalSettings({
-                  ...localSettings,
-                  default_stt_model: e.target.value,
-                })
-              }
-              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
-            >
-              <option value="tiny.en">tiny.en (fastest, English only)</option>
-              <option value="base.en">base.en (recommended, English only)</option>
-              <option value="small.en">small.en (better accuracy)</option>
-              <option value="medium.en">medium.en (high accuracy)</option>
-              <option value="large-v3">large-v3 (best, multilingual)</option>
-            </select>
+            {localSettings.default_stt_provider === "whisperserver" ? (
+              <input
+                type="text"
+                value={localSettings.default_stt_model}
+                onChange={(e) =>
+                  setLocalSettings({
+                    ...localSettings,
+                    default_stt_model: e.target.value,
+                  })
+                }
+                placeholder="e.g., distil-whisper/distil-large-v3.5-ct2"
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+              />
+            ) : localSettings.default_stt_provider === "openai" ? (
+              <select
+                value={localSettings.default_stt_model}
+                onChange={(e) =>
+                  setLocalSettings({
+                    ...localSettings,
+                    default_stt_model: e.target.value,
+                  })
+                }
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+              >
+                <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (fast, cheaper)</option>
+                <option value="gpt-4o-transcribe">gpt-4o-transcribe (higher quality)</option>
+                <option value="whisper-1">whisper-1 (original)</option>
+                <option value="gpt-4o-transcribe-diarize">gpt-4o-transcribe-diarize (speaker labels)</option>
+              </select>
+            ) : (
+              <select
+                value={localSettings.default_stt_model}
+                onChange={(e) =>
+                  setLocalSettings({
+                    ...localSettings,
+                    default_stt_model: e.target.value,
+                  })
+                }
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+              >
+                <option value="tiny.en">tiny.en (fastest, English only)</option>
+                <option value="base.en">base.en (recommended, English only)</option>
+                <option value="small.en">small.en (better accuracy)</option>
+                <option value="medium.en">medium.en (high accuracy)</option>
+                <option value="large-v3">large-v3 (best, multilingual)</option>
+              </select>
+            )}
             <p className="text-xs text-gray-500 mt-1">
-              Models are downloaded automatically on first use
+              {localSettings.default_stt_provider === "whisperserver"
+                ? "Model name from your server (e.g., check its /v1/models endpoint)"
+                : localSettings.default_stt_provider === "openai"
+                ? "Diarize adds speaker labels but may need chunking for audio > 30s"
+                : "Models are downloaded automatically on first use"}
             </p>
           </div>
         </div>

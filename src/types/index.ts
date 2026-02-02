@@ -2,7 +2,7 @@
 export type RecordingStatus = "loading" | "recording" | "processing" | "ready" | "error";
 
 // STT provider types
-export type SttProvider = "whispercpp" | "deepgram" | "openai" | string;
+export type SttProvider = "whispercpp" | "whisperserver" | "openai" | "deepgram" | string;
 
 // LLM provider types
 export type LlmProvider = "openai" | "anthropic" | "ollama" | string;
@@ -58,6 +58,7 @@ export interface Settings {
   auto_paste: boolean;
   context_awareness: boolean;
   language: string;
+  whisper_server_url?: string;
 }
 
 // Recording status response
