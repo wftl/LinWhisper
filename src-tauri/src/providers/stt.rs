@@ -73,7 +73,9 @@ impl SttProvider for WhisperCppProvider {
             let mut text = String::new();
             for i in 0..num_segments {
                 if let Ok(segment) = state.full_get_segment_text(i) {
-                    text.push_str(&segment);
+                    if !is_whisper_artifact(segment.trim()) {
+                        text.push_str(&segment);
+                    }
                 }
             }
 
@@ -166,6 +168,35 @@ pub async fn create_stt_provider(
     }
 }
 
+/// Check if a whisper segment is a non-speech artifact marker rather than actual transcription.
+/// Whisper.cpp emits these for silence, music, applause, and other non-speech audio.
+fn is_whisper_artifact(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    // Whisper artifacts are wrapped in brackets or parentheses, e.g.
+    // "[BLANK_AUDIO]", "[silence]", "(music)", "[MUSIC]", etc.
+    let is_bracketed = (text.starts_with('[') && text.ends_with(']'))
+        || (text.starts_with('(') && text.ends_with(')'));
+    if !is_bracketed {
+        return false;
+    }
+    let inner = &text[1..text.len() - 1];
+    let lower = inner.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "blank_audio"
+            | "blank audio"
+            | "silence"
+            | "music"
+            | "applause"
+            | "laughter"
+            | "inaudible"
+            | "no speech"
+            | "no audio"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +205,28 @@ mod tests {
     fn test_get_model_path() {
         let path = get_model_path("base.en").unwrap();
         assert!(path.to_str().unwrap().contains("ggml-base.en.bin"));
+    }
+
+    #[test]
+    fn test_whisper_artifacts_detected() {
+        assert!(is_whisper_artifact("[BLANK_AUDIO]"));
+        assert!(is_whisper_artifact("[blank_audio]"));
+        assert!(is_whisper_artifact("[BLANK AUDIO]"));
+        assert!(is_whisper_artifact("[silence]"));
+        assert!(is_whisper_artifact("[Silence]"));
+        assert!(is_whisper_artifact("(music)"));
+        assert!(is_whisper_artifact("[MUSIC]"));
+        assert!(is_whisper_artifact("[laughter]"));
+        assert!(is_whisper_artifact("(applause)"));
+        assert!(is_whisper_artifact("[inaudible]"));
+        assert!(is_whisper_artifact(""));
+    }
+
+    #[test]
+    fn test_real_speech_not_filtered() {
+        assert!(!is_whisper_artifact("Hello world"));
+        assert!(!is_whisper_artifact("I like music"));
+        assert!(!is_whisper_artifact("The silence was deafening"));
+        assert!(!is_whisper_artifact("[custom tag]")); // not a known artifact
     }
 }
