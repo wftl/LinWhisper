@@ -94,6 +94,10 @@ pub struct Mode {
     /// Whether this is a built-in mode
     #[serde(default)]
     pub builtin: bool,
+
+    /// Whether this mode is disabled (hidden from tray menu)
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 fn default_stt_model() -> String {
@@ -114,6 +118,7 @@ impl Default for Mode {
             prompt_template: String::new(),
             output_format: OutputFormat::Plain,
             builtin: true,
+            disabled: false,
         }
     }
 }
@@ -143,6 +148,7 @@ pub fn create_builtin_modes() -> Vec<Mode> {
             prompt_template: String::new(),
             output_format: OutputFormat::Plain,
             builtin: true,
+            disabled: false,
         },
         Mode {
             key: "message".to_string(),
@@ -173,6 +179,7 @@ Transcript to clean up:
 Cleaned message:"#.to_string(),
             output_format: OutputFormat::Plain,
             builtin: true,
+            disabled: false,
         },
         Mode {
             key: "email".to_string(),
@@ -207,6 +214,7 @@ Transcript:
 Email:"#.to_string(),
             output_format: OutputFormat::Plain,
             builtin: true,
+            disabled: false,
         },
         Mode {
             key: "note".to_string(),
@@ -237,6 +245,7 @@ Transcript:
 Notes:"#.to_string(),
             output_format: OutputFormat::Markdown,
             builtin: true,
+            disabled: false,
         },
         Mode {
             key: "meeting".to_string(),
@@ -270,6 +279,7 @@ Transcript:
 Meeting Summary:"#.to_string(),
             output_format: OutputFormat::Markdown,
             builtin: true,
+            disabled: false,
         },
         Mode {
             key: "super".to_string(),
@@ -303,6 +313,7 @@ Transcript:
 Output:"#.to_string(),
             output_format: OutputFormat::Plain,
             builtin: true,
+            disabled: false,
         },
     ]
 }

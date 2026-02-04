@@ -79,6 +79,10 @@ pub async fn update_tray_menu(handle: &AppHandle, state: &AppState) -> Result<()
     let mut modes_builder = SubmenuBuilder::with_id(handle, "modes", "Mode");
 
     for mode in state.modes.values() {
+        // Skip disabled modes
+        if mode.disabled {
+            continue;
+        }
         let id = format!("mode_{}", mode.key);
         let label = if mode.key == state.active_mode_key {
             format!("✓ {}", mode.name)
