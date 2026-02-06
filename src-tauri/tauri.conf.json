@@ -11,10 +11,6 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "trayIcon": {
-      "iconPath": "icons/tray-green.png",
-      "iconAsTemplate": false
-    },
     "windows": [
       {
         "title": "WhisperTray",
