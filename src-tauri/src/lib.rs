@@ -26,6 +26,13 @@ pub fn run() {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // Suppress ALSA lib error messages (dmix, dsnoop, oss, etc.) that spam stderr
+    // when cpal probes audio backends. These are harmless on PipeWire systems.
+    // SAFETY: passing None sets a null handler, which silences all libasound diagnostics.
+    unsafe {
+        alsa_sys::snd_lib_error_set_handler(None);
+    }
+
     info!("Starting WhisperTray...");
 
     tauri::Builder::default()

@@ -40,6 +40,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Audio
 cpal = "0.15"
 hound = "3.5"
+alsa-sys = "0.3"
 
 # whisper.cpp bindings
 whisper-rs = "0.11"
