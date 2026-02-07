@@ -147,9 +147,14 @@ impl Default for RecordingHandle {
 /// Callback type for audio level updates
 pub type LevelCallback = Box<dyn Fn(f32) + Send + 'static>;
 
-/// Start recording in a separate thread (returns immediately)
-/// The stream is managed in the spawned thread
-/// Optional level_callback is called with audio level (0.0-1.0) periodically
+/// Start recording audio from the specified device.
+///
+/// The stream is built in a dedicated thread (cpal's Stream is !Send) but the
+/// caller blocks on a channel until the stream is confirmed working. This way
+/// device/format/ALSA errors propagate as a normal Result to the caller and
+/// no recording state is committed until the stream is live.
+///
+/// Optional level_callback is called with audio level (0.0-1.0) periodically.
 pub fn start_recording(
     handle: RecordingHandle,
     device_name: &str,
@@ -171,14 +176,27 @@ pub fn start_recording(
     );
 
     handle.clear_samples();
-    handle.set_recording(true);
 
     let source_sample_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
     let sample_format = config.sample_format();
-    let handle_clone = handle.clone();
 
-    // Spawn a thread to manage the stream (Stream is not Send)
+    // Validate format before spawning thread
+    match sample_format {
+        SampleFormat::F32 | SampleFormat::I16 | SampleFormat::U16 => {}
+        _ => {
+            return Err(AppError::Audio(format!(
+                "Unsupported sample format: {:?}",
+                sample_format
+            )));
+        }
+    }
+
+    let handle_clone = handle.clone();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<std::result::Result<(), String>>(1);
+
+    // Stream is !Send (cpal uses PhantomData<*mut()> for cross-platform safety),
+    // so it must be built and kept alive on the same thread.
     std::thread::spawn(move || {
         let err_fn = |err| {
             log::error!("Audio stream error: {}", err);
@@ -249,45 +267,51 @@ pub fn start_recording(
                     None,
                 )
             }
-            _ => {
-                log::error!("Unsupported sample format: {:?}", sample_format);
+            _ => unreachable!("sample format validated before thread spawn"),
+        };
+
+        let stream = match stream_result {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.send(Err(format!("Failed to build audio stream: {}", e)));
                 return;
             }
         };
 
-        match stream_result {
-            Ok(stream) => {
-                if let Err(e) = stream.play() {
-                    log::error!("Failed to play stream: {}", e);
-                    handle_clone.set_recording(false);
-                    return;
+        if let Err(e) = stream.play() {
+            let _ = tx.send(Err(format!("Failed to start audio stream: {}", e)));
+            return;
+        }
+
+        // Stream is live — commit to recording state, then signal the caller.
+        // Order matters: set_recording must be visible before the caller proceeds,
+        // which is guaranteed because the channel send happens-after the SeqCst store.
+        handle_clone.set_recording(true);
+        let _ = tx.send(Ok(()));
+
+        // Keep the stream alive while recording (dropping it stops capture)
+        let mut last_level_update = std::time::Instant::now();
+        while handle_clone.is_recording() {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+
+            // Emit level callback every ~100ms
+            if last_level_update.elapsed() >= std::time::Duration::from_millis(100) {
+                if let Some(ref cb) = level_callback {
+                    let (level, _peak) = handle_clone.get_level();
+                    cb(level);
                 }
-
-                // Keep the thread alive while recording
-                // Also emit level updates via callback
-                let mut last_level_update = std::time::Instant::now();
-                while handle_clone.is_recording() {
-                    std::thread::sleep(std::time::Duration::from_millis(30));
-
-                    // Emit level callback every ~100ms
-                    if last_level_update.elapsed() >= std::time::Duration::from_millis(100) {
-                        if let Some(ref cb) = level_callback {
-                            let (level, _peak) = handle_clone.get_level();
-                            cb(level);
-                        }
-                        last_level_update = std::time::Instant::now();
-                    }
-                }
-
-                // Stream will be dropped here, stopping the recording
-                log::info!("Recording thread finished");
-            }
-            Err(e) => {
-                log::error!("Failed to build stream: {}", e);
-                handle_clone.set_recording(false);
+                last_level_update = std::time::Instant::now();
             }
         }
+
+        log::info!("Recording thread finished");
     });
+
+    // Block until the thread reports whether the stream was created successfully.
+    // This is fast — build_input_stream and play() are quick synchronous ALSA calls.
+    rx.recv()
+        .map_err(|_| AppError::Audio("Recording thread exited unexpectedly".to_string()))?
+        .map_err(AppError::Audio)?;
 
     Ok(())
 }
