@@ -73,31 +73,49 @@ pub fn copy_and_paste(text: &str, should_paste: bool) -> Result<()> {
             log::info!("Wayland detected, typing text directly");
             if let Err(e) = type_text(text) {
                 log::warn!("Direct typing failed ({}), trying paste fallback", e);
-                paste()?;
+                paste(false)?;
             }
         } else {
-            paste()?;
+            // On X11, detect if the focused window is a terminal emulator.
+            // Terminals use Ctrl+Shift+V for paste instead of Ctrl+V.
+            let terminal = get_active_window_class()
+                .map(|class| {
+                    let is_term = is_terminal_window(&class);
+                    if is_term {
+                        log::info!(
+                            "Terminal detected (class: {}), will use Ctrl+Shift+V",
+                            class
+                        );
+                    } else {
+                        log::debug!("Active window class: {}", class);
+                    }
+                    is_term
+                })
+                .unwrap_or(false);
+            paste(terminal)?;
         }
     }
 
     Ok(())
 }
 
-/// Simulate Ctrl+V paste using the best available backend
-pub fn paste() -> Result<()> {
+/// Simulate paste using the best available backend.
+/// If `shifted` is true, sends Ctrl+Shift+V (for terminal emulators)
+/// instead of the default Ctrl+V.
+fn paste(shifted: bool) -> Result<()> {
     let backend = detect_backend();
 
     // Delay to ensure clipboard is ready and user has released hotkey
     thread::sleep(Duration::from_millis(200));
 
     match backend {
-        PasteBackend::Enigo => paste_enigo(),
+        PasteBackend::Enigo => paste_enigo(shifted),
         PasteBackend::Wtype => {
             // Try wtype, fall back to ydotool if it fails (compositor may not support virtual keyboard)
-            if let Err(e) = paste_wtype() {
+            if let Err(e) = paste_wtype(shifted) {
                 log::warn!("wtype failed ({}), trying ydotool fallback", e);
                 if is_command_available("ydotool") {
-                    paste_ydotool()
+                    paste_ydotool(shifted)
                 } else {
                     log::warn!("No fallback available, text is in clipboard");
                     Ok(())
@@ -106,7 +124,7 @@ pub fn paste() -> Result<()> {
                 Ok(())
             }
         }
-        PasteBackend::Ydotool => paste_ydotool(),
+        PasteBackend::Ydotool => paste_ydotool(shifted),
         PasteBackend::ClipboardOnly => {
             log::info!("No paste backend available, text is in clipboard");
             Ok(())
@@ -115,16 +133,22 @@ pub fn paste() -> Result<()> {
 }
 
 /// Paste using enigo (X11/libxdo)
-fn paste_enigo() -> Result<()> {
+fn paste_enigo(shifted: bool) -> Result<()> {
     use enigo::{Enigo, Keyboard, Settings};
 
     let mut enigo = Enigo::new(&Settings::default())
         .map_err(|e| AppError::Clipboard(format!("Failed to create input simulator: {}", e)))?;
 
-    // Simulate Ctrl+V
+    // Simulate Ctrl+V or Ctrl+Shift+V
     enigo
         .key(enigo::Key::Control, enigo::Direction::Press)
         .map_err(|e| AppError::Clipboard(format!("Failed to press Ctrl: {}", e)))?;
+
+    if shifted {
+        enigo
+            .key(enigo::Key::Shift, enigo::Direction::Press)
+            .map_err(|e| AppError::Clipboard(format!("Failed to press Shift: {}", e)))?;
+    }
 
     thread::sleep(Duration::from_millis(20));
 
@@ -134,24 +158,43 @@ fn paste_enigo() -> Result<()> {
 
     thread::sleep(Duration::from_millis(20));
 
+    if shifted {
+        enigo
+            .key(enigo::Key::Shift, enigo::Direction::Release)
+            .map_err(|e| AppError::Clipboard(format!("Failed to release Shift: {}", e)))?;
+    }
+
     enigo
         .key(enigo::Key::Control, enigo::Direction::Release)
         .map_err(|e| AppError::Clipboard(format!("Failed to release Ctrl: {}", e)))?;
 
-    log::info!("Paste completed (enigo/X11)");
+    log::info!(
+        "Paste completed (enigo/X11{})",
+        if shifted { ", Ctrl+Shift+V" } else { "" }
+    );
     Ok(())
 }
 
 /// Paste using wtype (Wayland)
-fn paste_wtype() -> Result<()> {
-    // wtype -M ctrl -k v -m ctrl
-    let output = Command::new("wtype")
-        .args(["-M", "ctrl", "-k", "v", "-m", "ctrl"])
-        .output()
-        .map_err(|e| AppError::Clipboard(format!("Failed to run wtype: {}", e)))?;
+fn paste_wtype(shifted: bool) -> Result<()> {
+    let output = if shifted {
+        // wtype -M ctrl -M shift -k v -m shift -m ctrl
+        Command::new("wtype")
+            .args(["-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"])
+            .output()
+    } else {
+        // wtype -M ctrl -k v -m ctrl
+        Command::new("wtype")
+            .args(["-M", "ctrl", "-k", "v", "-m", "ctrl"])
+            .output()
+    }
+    .map_err(|e| AppError::Clipboard(format!("Failed to run wtype: {}", e)))?;
 
     if output.status.success() {
-        log::info!("Paste completed (wtype/Wayland)");
+        log::info!(
+            "Paste completed (wtype/Wayland{})",
+            if shifted { ", Ctrl+Shift+V" } else { "" }
+        );
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -163,15 +206,18 @@ fn paste_wtype() -> Result<()> {
 }
 
 /// Paste using ydotool (works on both X11 and Wayland)
-fn paste_ydotool() -> Result<()> {
-    // Use ydotool key with key names (works with newer versions)
+fn paste_ydotool(shifted: bool) -> Result<()> {
+    let key_combo = if shifted { "ctrl+shift+v" } else { "ctrl+v" };
     let output = Command::new("ydotool")
-        .args(["key", "ctrl+v"])
+        .args(["key", key_combo])
         .output()
         .map_err(|e| AppError::Clipboard(format!("Failed to run ydotool: {}", e)))?;
 
     if output.status.success() {
-        log::info!("Paste completed (ydotool)");
+        log::info!(
+            "Paste completed (ydotool{})",
+            if shifted { ", Ctrl+Shift+V" } else { "" }
+        );
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -278,6 +324,71 @@ pub fn get_clipboard_text() -> Result<String> {
         .map_err(|e| AppError::Clipboard(format!("Failed to get clipboard text: {}", e)))
 }
 
+/// Get the WM_CLASS of the currently focused window (X11 only).
+/// Uses xdotool to find the active window ID, then xprop to read WM_CLASS.
+/// Returns the full WM_CLASS string (e.g. "gnome-terminal-server", "Gnome-terminal")
+/// so that is_terminal_window() can substring-match against it.
+fn get_active_window_class() -> Option<String> {
+    // Get active window ID via xdotool
+    let window_id = Command::new("xdotool")
+        .arg("getactivewindow")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+
+    // Read WM_CLASS via xprop
+    // Output format: WM_CLASS(STRING) = "instance", "class"
+    let output = Command::new("xprop")
+        .args(["-id", &window_id, "WM_CLASS"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+
+    if output.contains("WM_CLASS") {
+        Some(output)
+    } else {
+        None
+    }
+}
+
+/// Check if a window class name belongs to a terminal emulator.
+/// Uses case-insensitive substring matching against known terminal classes.
+fn is_terminal_window(class: &str) -> bool {
+    let class_lower = class.to_lowercase();
+
+    // Substrings that reliably identify terminal emulators.
+    // "terminal" alone catches gnome-terminal, xfce4-terminal, mate-terminal,
+    // lxterminal, elementary-terminal, deepin-terminal, etc.
+    const TERMINAL_SUBSTRINGS: &[&str] = &[
+        "terminal",
+        "konsole",
+        "alacritty",
+        "kitty",
+        "xterm",
+        "rxvt",       // urxvt, rxvt-unicode
+        "terminator",
+        "tilix",
+        "foot",
+        "wezterm",
+        "termite",
+        "tilda",
+        "guake",
+        "yakuake",
+        "sakura",
+        "terminology",
+        "cool-retro-term",
+        "ghostty",
+        "contour",
+        "warp",
+    ];
+
+    TERMINAL_SUBSTRINGS
+        .iter()
+        .any(|substr| class_lower.contains(substr))
+}
+
 /// Check if we're running under Wayland
 pub fn is_wayland() -> bool {
     std::env::var("WAYLAND_DISPLAY").is_ok()
@@ -357,5 +468,25 @@ mod tests {
     fn test_get_paste_info() {
         let info = get_paste_info();
         assert!(info.clipboard_supported);
+    }
+
+    #[test]
+    fn test_is_terminal_window() {
+        // Should match common terminals
+        assert!(is_terminal_window("Gnome-terminal"));
+        assert!(is_terminal_window("gnome-terminal-server"));
+        assert!(is_terminal_window("xfce4-terminal"));
+        assert!(is_terminal_window("Alacritty"));
+        assert!(is_terminal_window("kitty"));
+        assert!(is_terminal_window("konsole"));
+        assert!(is_terminal_window("Tilix"));
+        assert!(is_terminal_window("foot"));
+        assert!(is_terminal_window("org.wezfurlong.wezterm"));
+
+        // Should NOT match non-terminals
+        assert!(!is_terminal_window("Firefox"));
+        assert!(!is_terminal_window("code"));
+        assert!(!is_terminal_window("Nautilus"));
+        assert!(!is_terminal_window("libreoffice"));
     }
 }

@@ -33,6 +33,7 @@ sudo apt install -y \
     libclang-dev \
     libasound2-dev \
     libxdo-dev \
+    xdotool \
     cmake \
     ffmpeg
 
@@ -45,6 +46,7 @@ sudo dnf install -y \
     openssl-devel \
     libsecret-devel \
     clang-devel \
+    xdotool \
     cmake \
     ffmpeg
 
@@ -57,6 +59,7 @@ sudo pacman -S \
     openssl \
     libsecret \
     clang \
+    xdotool \
     cmake \
     ffmpeg
 ```
@@ -219,7 +222,8 @@ WhisperTray works on both X11 and Wayland, but with some differences:
 
 ### X11
 - Full support for all features
-- Direct paste simulation works
+- Direct paste simulation works (Ctrl+V), with automatic Ctrl+Shift+V for terminal emulators
+- Terminal detection requires `xdotool` (optional — falls back to Ctrl+V if missing)
 - Global hotkeys fully supported
 
 ### Wayland
