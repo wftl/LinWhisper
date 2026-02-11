@@ -30,6 +30,15 @@ BASIC_COMMANDS = [
     ("dot dot dot",       "\u2026"),  # …
 ]
 
+# Commands whose symbols should attach to the preceding word (no space before).
+# When generating bare-command patterns, the pattern for these gets a leading
+# space so the Aho-Corasick match consumes it, e.g. " comma" → ","
+NO_SPACE_BEFORE = {
+    "comma", "period", "exclamation point", "question mark",
+    "colon", "semicolon", "close paren", "close bracket",
+    "close quote", "dot dot dot",
+}
+
 # ──────────────────────────────────────────────
 #  PECULIAR: special character names → symbols
 # ──────────────────────────────────────────────
@@ -66,8 +75,13 @@ def generate() -> str:
         basic_replacements.append(cmd)
 
     # Bare commands ("X" → symbol)
+    # For NO_SPACE_BEFORE commands the pattern includes a leading space so the
+    # Aho-Corasick match consumes it, producing e.g. "hello," instead of "hello ,"
     for cmd, sym in BASIC_COMMANDS:
-        basic_patterns.append(cmd)
+        if cmd in NO_SPACE_BEFORE:
+            basic_patterns.append(f" {cmd}")
+        else:
+            basic_patterns.append(cmd)
         basic_replacements.append(sym)
 
     lines.append("/// Basic substitution patterns: spoken punctuation commands.")

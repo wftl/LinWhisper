@@ -71,13 +71,13 @@ mod tests {
     #[test]
     fn basic_comma() {
         let out = apply_substitutions("hello comma world", true, false);
-        assert_eq!(out, "hello , world");
+        assert_eq!(out, "hello, world");
     }
 
     #[test]
     fn basic_period() {
         let out = apply_substitutions("end of sentence period", true, false);
-        assert_eq!(out, "end of sentence .");
+        assert_eq!(out, "end of sentence.");
     }
 
     #[test]
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn case_insensitive() {
         let out = apply_substitutions("Hello COMMA World", true, false);
-        assert_eq!(out, "Hello , World");
+        assert_eq!(out, "Hello, World");
     }
 
     #[test]
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn both_enabled() {
         let out = apply_substitutions("alpha comma beta", true, true);
-        assert_eq!(out, "\u{03B1} , \u{03B2}");
+        assert_eq!(out, "\u{03B1}, \u{03B2}");
     }
 
     #[test]
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn dot_dot_dot() {
         let out = apply_substitutions("thinking dot dot dot yeah", true, false);
-        assert_eq!(out, "thinking \u{2026} yeah");
+        assert_eq!(out, "thinking\u{2026} yeah");
     }
 
     #[test]
@@ -123,6 +123,6 @@ mod tests {
             true,
             false,
         );
-        assert_eq!(out, "dear sir , I have a ?");
+        assert_eq!(out, "dear sir, I have a?");
     }
 }
