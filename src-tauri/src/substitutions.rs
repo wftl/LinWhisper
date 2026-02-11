@@ -95,14 +95,24 @@ mod tests {
 
     #[test]
     fn peculiar_greek() {
+        let esc = substitution_dicts::ESCAPE_STR;
+        let input = format!("{esc} alpha and {esc} beta particles");
+        let out = apply_substitutions(&input, false, true);
+        assert_eq!(out, "α and β particles");
+    }
+
+    #[test]
+    fn peculiar_bare_word_unchanged() {
         let out = apply_substitutions("alpha and beta particles", false, true);
-        assert_eq!(out, "\u{03B1} and \u{03B2} particles");
+        assert_eq!(out, "alpha and beta particles");
     }
 
     #[test]
     fn both_enabled() {
-        let out = apply_substitutions("alpha comma beta", true, true);
-        assert_eq!(out, "\u{03B1}, \u{03B2}");
+        let esc = substitution_dicts::ESCAPE_STR;
+        let input = format!("{esc} alpha comma {esc} beta");
+        let out = apply_substitutions(&input, true, true);
+        assert_eq!(out, "α, β");
     }
 
     #[test]
@@ -114,7 +124,7 @@ mod tests {
     #[test]
     fn dot_dot_dot() {
         let out = apply_substitutions("thinking dot dot dot yeah", true, false);
-        assert_eq!(out, "thinking\u{2026} yeah");
+        assert_eq!(out, "thinking… yeah");
     }
 
     #[test]

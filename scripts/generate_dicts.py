@@ -35,7 +35,7 @@ BASIC_COMMANDS = [
     ("question mark",     "?"),
     ("colon",             ":"),
     ("semicolon",         ";"),
-    ("dot dot dot",       "\u2026"),  # …
+    ("dot dot dot",       "…"),
     ("backslash",         "\\"),
     ("forward slash",     "/"),
 ]
@@ -49,16 +49,40 @@ NO_SPACE_BEFORE = {
     "close quote", "dot dot dot",
 }
 
+# Commands where STT may already insert the symbol, so saying the command
+# would produce a duplicate.  Generates e.g. ", comma" → "," to absorb it.
+PUNCTUATION_DUP_PREVENT = ["comma", "period", "question mark"]
+
 # ──────────────────────────────────────────────
 #  PECULIAR: special character names → symbols
 # ──────────────────────────────────────────────
 
 PECULIAR = [
-    ("alpha", "\u03B1"),  # α
-    ("beta",  "\u03B2"),  # β
+    ("alpha", "α"),
+    ("beta",  "β"),
+    ("right arrow", "⟶"),
+    ("for all", "∀"),
+    ("exists", "∃"),
+    ("cap", "⋂"),
+    ("cup", "⋃"),
+    ("in", "∈"),
+    ("integers", "ℤ"),
+    ("naturals", "ℕ"),
+    ("reals", "ℝ"),
+    ("greater than", ">"),
+    ("less than", "<"),
+    ("at least", "≥"),
+    ("at most", "≤"),
+
 ]
 
-# PECULIAR_NEED_WORD_BOUNDARIES
+PECULIAR_NEED_ESCAPE = {
+    "alpha", "beta",
+    "for all", "exists",
+    "cap", "cup", "in",
+    "integers", "naturals", "reals",
+    "greater than", "less than", "at least", "at most",
+}
 
 def rust_str(s: str) -> str:
     """Escape a string for a Rust string literal."""
@@ -95,6 +119,15 @@ def generate() -> str:
             basic_patterns.append(cmd)
         basic_replacements.append(sym)
 
+    # Duplicate-prevention: absorb "symbol + spoken command" when STT already
+    # inserted the punctuation, e.g. ", comma" → ","
+    sym_of = dict(BASIC_COMMANDS)
+    for cmd in PUNCTUATION_DUP_PREVENT:
+        sym = sym_of[cmd]
+        basic_patterns.append(f"{sym} {cmd}")
+        basic_replacements.append(sym)
+
+    lines.append("#[cfg(test)]")
     lines.append("/// Escape token, for use in Rust tests.")
     lines.append(f'pub(crate) const ESCAPE_STR: &str = "{rust_str(ESCAPE_STR)}";')
 
@@ -117,7 +150,10 @@ def generate() -> str:
     lines.append("/// Peculiar substitution patterns: special character names.")
     lines.append("pub(crate) static PECULIAR_PATTERNS: &[&str] = &[")
     for cmd, _sym in PECULIAR:
-        lines.append(f'    "{rust_str(cmd)}",')
+        if cmd in PECULIAR_NEED_ESCAPE:
+            lines.append(f'    "{rust_str(ESCAPE_STR)} {rust_str(cmd)}",')
+        else:
+            lines.append(f'    "{rust_str(cmd)}",')
     lines.append("];")
     lines.append("")
 
