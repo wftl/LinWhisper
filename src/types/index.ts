@@ -60,6 +60,8 @@ export interface Settings {
   language: string;
   whisper_server_url?: string;
   ollama_url?: string;
+  basic_substitutions: boolean;
+  peculiar_substitutions: boolean;
 }
 
 // Recording status response

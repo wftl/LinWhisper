@@ -486,6 +486,46 @@ export default function SettingsPage() {
               </p>
             </div>
           </label>
+
+          <label className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              checked={localSettings.basic_substitutions}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  basic_substitutions: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">Basic substitutions</span>
+              <p className="text-xs text-gray-500">
+                Convert spoken punctuation commands (comma, period, etc.) to symbols
+              </p>
+            </div>
+          </label>
+
+          <label className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              checked={localSettings.peculiar_substitutions}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  peculiar_substitutions: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">Peculiar substitutions</span>
+              <p className="text-xs text-gray-500">
+                Convert spoken names to special characters (alpha → α, beta → β)
+              </p>
+            </div>
+          </label>
         </div>
       </section>
 

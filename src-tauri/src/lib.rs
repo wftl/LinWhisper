@@ -13,6 +13,7 @@ pub mod modes;
 pub mod paste;
 pub mod providers;
 pub mod state;
+pub mod substitutions;
 pub mod tray;
 
 use log::info;

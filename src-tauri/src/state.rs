@@ -60,6 +60,12 @@ pub struct Settings {
     /// URL for Ollama server (used when llm_provider is Ollama)
     #[serde(default)]
     pub ollama_url: Option<String>,
+    /// Replace spoken punctuation commands (comma, period, etc.) with symbols
+    #[serde(default)]
+    pub basic_substitutions: bool,
+    /// Replace spoken names with special characters (alpha → α, beta → β)
+    #[serde(default)]
+    pub peculiar_substitutions: bool,
 }
 
 impl Default for Settings {
@@ -76,6 +82,8 @@ impl Default for Settings {
             language: "en".to_string(),
             whisper_server_url: None,
             ollama_url: None,
+            basic_substitutions: false,
+            peculiar_substitutions: false,
         }
     }
 }
@@ -287,6 +295,13 @@ impl AppState {
         } else {
             transcript.clone()
         };
+
+        // Apply deterministic text substitutions (spoken commands → symbols)
+        let output = crate::substitutions::apply_substitutions(
+            &output,
+            self.settings.basic_substitutions,
+            self.settings.peculiar_substitutions,
+        );
 
         // Save to history
         let history_item = HistoryItem {

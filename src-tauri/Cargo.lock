@@ -6320,6 +6320,7 @@ dependencies = [
 name = "whispertray"
 version = "0.2.0"
 dependencies = [
+ "aho-corasick",
  "alsa-sys",
  "anyhow",
  "arboard",

@@ -55,6 +55,9 @@ async-trait = "0.1"
 # Regex for template processing
 regex = "1"
 
+# Deterministic text substitution (spoken commands → symbols)
+aho-corasick = "1"
+
 # Logging
 log = "0.4"
 env_logger = "0.11"
