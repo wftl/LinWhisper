@@ -2,14 +2,22 @@
 """Generate substitution_dicts.rs from the dictionaries defined below.
 
 Usage:
-    python3 scripts/generate_dicts.py > src-tauri/src/substitution_dicts.rs
+    python3 scripts/generate_dicts.py           # print to stdout
+    python3 scripts/generate_dicts.py --write    # overwrite src-tauri/src/substitution_dicts.rs
 """
+
+import argparse
+from pathlib import Path
+
+ESCAPE_STR = "slash"
+
+OUTPUT_PATH = Path(__file__).resolve().parent.parent / "src-tauri" / "src" / "substitution_dicts.rs"
 
 # ──────────────────────────────────────────────
 #  BASIC: spoken punctuation commands → symbols
 # ──────────────────────────────────────────────
 # Each (command, symbol) pair generates TWO entries:
-#   "literal <command>" → "<command>"   (escape hatch)
+#   "ESCAPE_STR <command>" → "<command>"   (escape hatch)
 #   "<command>"         → "<symbol>"    (the substitution)
 
 BASIC_COMMANDS = [
@@ -28,6 +36,8 @@ BASIC_COMMANDS = [
     ("colon",             ":"),
     ("semicolon",         ";"),
     ("dot dot dot",       "\u2026"),  # …
+    ("backslash",         "\\"),
+    ("forward slash",     "/"),
 ]
 
 # Commands whose symbols should attach to the preceding word (no space before).
@@ -48,6 +58,7 @@ PECULIAR = [
     ("beta",  "\u03B2"),  # β
 ]
 
+# PECULIAR_NEED_WORD_BOUNDARIES
 
 def rust_str(s: str) -> str:
     """Escape a string for a Rust string literal."""
@@ -69,9 +80,9 @@ def generate() -> str:
     basic_patterns = []
     basic_replacements = []
 
-    # Escape hatches first ("literal X" → word X)
+    # Escape hatches first ("ESCAPE_STR X" → word X)
     for cmd, _sym in BASIC_COMMANDS:
-        basic_patterns.append(f"literal {cmd}")
+        basic_patterns.append(f"{ESCAPE_STR} {cmd}")
         basic_replacements.append(cmd)
 
     # Bare commands ("X" → symbol)
@@ -84,8 +95,11 @@ def generate() -> str:
             basic_patterns.append(cmd)
         basic_replacements.append(sym)
 
+    lines.append("/// Escape token, for use in Rust tests.")
+    lines.append(f'pub(crate) const ESCAPE_STR: &str = "{rust_str(ESCAPE_STR)}";')
+
     lines.append("/// Basic substitution patterns: spoken punctuation commands.")
-    lines.append("/// Includes \"literal X\" escape hatches.")
+    lines.append(f"/// Includes \"{ESCAPE_STR} X\" escape hatches.")
     lines.append("pub(crate) static BASIC_PATTERNS: &[&str] = &[")
     for p in basic_patterns:
         lines.append(f'    "{rust_str(p)}",')
@@ -118,4 +132,14 @@ def generate() -> str:
 
 
 if __name__ == "__main__":
-    print(generate())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--write", action="store_true",
+                        help="overwrite src-tauri/src/substitution_dicts.rs in-place")
+    args = parser.parse_args()
+
+    output = generate()
+    if args.write:
+        OUTPUT_PATH.write_text(output + "\n")
+        print(f"wrote {OUTPUT_PATH}")
+    else:
+        print(output)

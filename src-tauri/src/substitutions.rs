@@ -81,8 +81,9 @@ mod tests {
     }
 
     #[test]
-    fn literal_escape() {
-        let out = apply_substitutions("the word literal comma is special", true, false);
+    fn escape_hatch() {
+        let input = format!("the word {} comma is special", substitution_dicts::ESCAPE_STR);
+        let out = apply_substitutions(&input, true, false);
         assert_eq!(out, "the word comma is special");
     }
 
