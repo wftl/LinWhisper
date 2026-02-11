@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_ollama_provider_creation() {
-        let provider = OllamaProvider::new("llama3.2".to_string());
+        let provider = OllamaProvider::new("llama3.2".to_string(), None);
         assert_eq!(provider.name(), "Ollama");
     }
 }
