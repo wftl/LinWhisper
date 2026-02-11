@@ -86,8 +86,8 @@ pub(crate) static BASIC_REPLACEMENTS: &[&str] = &[
     "?",
 ];
 
-/// Peculiar substitution patterns: special character names.
-pub(crate) static PECULIAR_PATTERNS: &[&str] = &[
+/// Math escaped patterns: ambiguous commands require escape prefix.
+pub(crate) static MATH_ESCAPED_PATTERNS: &[&str] = &[
     "slash alpha",
     "slash beta",
     "right arrow",
@@ -105,8 +105,56 @@ pub(crate) static PECULIAR_PATTERNS: &[&str] = &[
     "slash at most",
 ];
 
-/// Replacements for peculiar patterns (parallel to PECULIAR_PATTERNS).
-pub(crate) static PECULIAR_REPLACEMENTS: &[&str] = &[
+/// Replacements for math escaped patterns.
+pub(crate) static MATH_ESCAPED_REPLACEMENTS: &[&str] = &[
+    "α",
+    "β",
+    "⟶",
+    "∀",
+    "∃",
+    "⋂",
+    "⋃",
+    "∈",
+    "ℤ",
+    "ℕ",
+    "ℝ",
+    ">",
+    "<",
+    "≥",
+    "≤",
+];
+
+/// Trigger phrase that activates math mode (case-insensitive).
+pub(crate) const MATH_MODE_TRIGGER: &str = "math mode";
+
+/// Math mode patterns: all symbols available without escape prefix.
+/// Includes trigger phrase mapped to empty string for stripping.
+pub(crate) static MATH_MODE_PATTERNS: &[&str] = &[
+    "math mode",
+    "math mode, ",
+    "math mode ",
+    "alpha",
+    "beta",
+    "right arrow",
+    "for all",
+    "exists",
+    "cap",
+    "cup",
+    "in",
+    "integers",
+    "naturals",
+    "reals",
+    "greater than",
+    "less than",
+    "at least",
+    "at most",
+];
+
+/// Replacements for math mode patterns.
+pub(crate) static MATH_MODE_REPLACEMENTS: &[&str] = &[
+    "",
+    "",
+    "",
     "α",
     "β",
     "⟶",

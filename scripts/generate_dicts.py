@@ -54,10 +54,14 @@ NO_SPACE_BEFORE = {
 PUNCTUATION_DUP_PREVENT = ["comma", "period", "question mark"]
 
 # ──────────────────────────────────────────────
-#  PECULIAR: special character names → symbols
+#  MATH_ESCAPED / MATH_MODE: math symbol names
 # ──────────────────────────────────────────────
+# MATH_ESCAPED: default mode, common-English commands require ESCAPE_STR prefix.
+# MATH_MODE: activated by saying "math mode", all commands are bare (no prefix).
 
-PECULIAR = [
+MATH_MODE_TRIGGER = "math mode"
+
+MATH_ESCAPED = [
     ("alpha", "α"),
     ("beta",  "β"),
     ("right arrow", "⟶"),
@@ -73,10 +77,9 @@ PECULIAR = [
     ("less than", "<"),
     ("at least", "≥"),
     ("at most", "≤"),
-
 ]
 
-PECULIAR_NEED_ESCAPE = {
+MATH_NEED_ESCAPE = {
     "alpha", "beta",
     "for all", "exists",
     "cap", "cup", "in",
@@ -146,20 +149,46 @@ def generate() -> str:
     lines.append("];")
     lines.append("")
 
-    # --- Peculiar ---
-    lines.append("/// Peculiar substitution patterns: special character names.")
-    lines.append("pub(crate) static PECULIAR_PATTERNS: &[&str] = &[")
-    for cmd, _sym in PECULIAR:
-        if cmd in PECULIAR_NEED_ESCAPE:
+    # --- Math Escaped (default: ambiguous commands need ESCAPE_STR prefix) ---
+    lines.append("/// Math escaped patterns: ambiguous commands require escape prefix.")
+    lines.append("pub(crate) static MATH_ESCAPED_PATTERNS: &[&str] = &[")
+    for cmd, _sym in MATH_ESCAPED:
+        if cmd in MATH_NEED_ESCAPE:
             lines.append(f'    "{rust_str(ESCAPE_STR)} {rust_str(cmd)}",')
         else:
             lines.append(f'    "{rust_str(cmd)}",')
     lines.append("];")
     lines.append("")
 
-    lines.append("/// Replacements for peculiar patterns (parallel to PECULIAR_PATTERNS).")
-    lines.append("pub(crate) static PECULIAR_REPLACEMENTS: &[&str] = &[")
-    for _cmd, sym in PECULIAR:
+    lines.append("/// Replacements for math escaped patterns.")
+    lines.append("pub(crate) static MATH_ESCAPED_REPLACEMENTS: &[&str] = &[")
+    for _cmd, sym in MATH_ESCAPED:
+        lines.append(f'    "{rust_str(sym)}",')
+    lines.append("];")
+    lines.append("")
+
+    # --- Math Mode (activated by trigger phrase, all commands bare) ---
+    lines.append(f'/// Trigger phrase that activates math mode (case-insensitive).')
+    lines.append(f'pub(crate) const MATH_MODE_TRIGGER: &str = "{rust_str(MATH_MODE_TRIGGER)}";')
+    lines.append("")
+
+    lines.append("/// Math mode patterns: all symbols available without escape prefix.")
+    lines.append("/// Includes trigger phrase mapped to empty string for stripping.")
+    lines.append("pub(crate) static MATH_MODE_PATTERNS: &[&str] = &[")
+    lines.append(f'    "{rust_str(MATH_MODE_TRIGGER)}",')
+    lines.append(f'    "{rust_str(MATH_MODE_TRIGGER)}, ",')
+    lines.append(f'    "{rust_str(MATH_MODE_TRIGGER)} ",')
+    for cmd, _sym in MATH_ESCAPED:
+        lines.append(f'    "{rust_str(cmd)}",')
+    lines.append("];")
+    lines.append("")
+
+    lines.append("/// Replacements for math mode patterns.")
+    lines.append("pub(crate) static MATH_MODE_REPLACEMENTS: &[&str] = &[")
+    lines.append('    "",')  # replacement for trigger phrase
+    lines.append('    "",')  # replacement for trigger phrase
+    lines.append('    "",')  # replacement for trigger phrase
+    for _cmd, sym in MATH_ESCAPED:
         lines.append(f'    "{rust_str(sym)}",')
     lines.append("];")
     lines.append("")

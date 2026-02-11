@@ -30,24 +30,36 @@ static BASIC: LazyLock<SubstitutionSet> = LazyLock::new(|| {
     }
 });
 
-static PECULIAR: LazyLock<SubstitutionSet> = LazyLock::new(|| {
+static MATH_ESCAPED: LazyLock<SubstitutionSet> = LazyLock::new(|| {
     let ac = AhoCorasick::builder()
         .ascii_case_insensitive(true)
         .match_kind(MatchKind::LeftmostLongest)
-        .build(substitution_dicts::PECULIAR_PATTERNS)
-        .expect("peculiar substitution patterns are valid");
+        .build(substitution_dicts::MATH_ESCAPED_PATTERNS)
+        .expect("math escaped substitution patterns are valid");
     SubstitutionSet {
         ac,
-        replacements: substitution_dicts::PECULIAR_REPLACEMENTS,
+        replacements: substitution_dicts::MATH_ESCAPED_REPLACEMENTS,
+    }
+});
+
+static MATH_MODE: LazyLock<SubstitutionSet> = LazyLock::new(|| {
+    let ac = AhoCorasick::builder()
+        .ascii_case_insensitive(true)
+        .match_kind(MatchKind::LeftmostLongest)
+        .build(substitution_dicts::MATH_MODE_PATTERNS)
+        .expect("math mode substitution patterns are valid");
+    SubstitutionSet {
+        ac,
+        replacements: substitution_dicts::MATH_MODE_REPLACEMENTS,
     }
 });
 
 /// Apply text substitutions to STT output.
 ///
-/// Runs basic substitutions first (if enabled), then peculiar (if enabled).
+/// Runs basic substitutions first (if enabled), then math (if enabled).
 /// Returns the input unchanged (no allocation) if both flags are false.
-pub fn apply_substitutions(text: &str, basic: bool, peculiar: bool) -> String {
-    if !basic && !peculiar {
+pub fn apply_substitutions(text: &str, basic: bool, math: bool) -> String {
+    if !basic && !math {
         return text.to_string();
     }
 
@@ -57,8 +69,15 @@ pub fn apply_substitutions(text: &str, basic: bool, peculiar: bool) -> String {
         text.to_string()
     };
 
-    if peculiar {
-        result = PECULIAR.ac.replace_all(&result, PECULIAR.replacements);
+    if math {
+        // "math mode" trigger phrase → use bare patterns (no escape prefix needed).
+        // Otherwise use escaped patterns (ambiguous commands need "slash" prefix).
+        let set = if result.to_ascii_lowercase().contains(substitution_dicts::MATH_MODE_TRIGGER) {
+            &*MATH_MODE
+        } else {
+            &*MATH_ESCAPED
+        };
+        result = set.ac.replace_all(&result, set.replacements);
     }
 
     result
@@ -94,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn peculiar_greek() {
+    fn math_escaped() {
         let esc = substitution_dicts::ESCAPE_STR;
         let input = format!("{esc} alpha and {esc} beta particles");
         let out = apply_substitutions(&input, false, true);
@@ -102,9 +121,21 @@ mod tests {
     }
 
     #[test]
-    fn peculiar_bare_word_unchanged() {
+    fn math_escaped_bare_word_unchanged() {
         let out = apply_substitutions("alpha and beta particles", false, true);
         assert_eq!(out, "alpha and beta particles");
+    }
+
+    #[test]
+    fn math_mode_strips_trigger() {
+        let out = apply_substitutions("math mode for all x in naturals", false, true);
+        assert_eq!(out, " ∀ x ∈ ℕ");
+    }
+
+    #[test]
+    fn math_mode_case_insensitive_trigger() {
+        let out = apply_substitutions("Math Mode alpha", false, true);
+        assert_eq!(out, " α");
     }
 
     #[test]

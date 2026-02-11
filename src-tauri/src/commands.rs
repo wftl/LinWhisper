@@ -254,7 +254,7 @@ pub async fn reprocess_history_item(
     let language = state_guard.settings.language.clone();
     let ollama_url = state_guard.settings.ollama_url.clone();
     let basic_subs = state_guard.settings.basic_substitutions;
-    let peculiar_subs = state_guard.settings.peculiar_substitutions;
+    let math_subs = state_guard.settings.math_substitutions;
     let api_key = state_guard.get_api_key(&mode.llm_provider).map_err(|e| e.to_string())?;
     drop(state_guard);
 
@@ -281,7 +281,7 @@ pub async fn reprocess_history_item(
     };
 
     // Apply deterministic text substitutions (spoken commands → symbols)
-    let output = crate::substitutions::apply_substitutions(&output, basic_subs, peculiar_subs);
+    let output = crate::substitutions::apply_substitutions(&output, basic_subs, math_subs);
 
     // Update history item
     item.mode_key = mode_key;

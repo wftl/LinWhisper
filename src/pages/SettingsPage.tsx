@@ -510,19 +510,19 @@ export default function SettingsPage() {
           <label className="flex items-center gap-3">
             <input
               type="checkbox"
-              checked={localSettings.peculiar_substitutions}
+              checked={localSettings.math_substitutions}
               onChange={(e) =>
                 setLocalSettings({
                   ...localSettings,
-                  peculiar_substitutions: e.target.checked,
+                  math_substitutions: e.target.checked,
                 })
               }
               className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
             />
             <div>
-              <span className="text-white">Peculiar substitutions</span>
+              <span className="text-white">Math substitutions</span>
               <p className="text-xs text-gray-500">
-                Convert spoken names to special characters (alpha → α, beta → β)
+                Convert spoken math/symbol names (alpha → α, for all → ∀). Say "math mode" to skip prefix
               </p>
             </div>
           </label>

@@ -63,9 +63,9 @@ pub struct Settings {
     /// Replace spoken punctuation commands (comma, period, etc.) with symbols
     #[serde(default)]
     pub basic_substitutions: bool,
-    /// Replace spoken names with special characters (alpha → α, beta → β)
+    /// Replace spoken math/symbol names (alpha → α, for all → ∀, etc.)
     #[serde(default)]
-    pub peculiar_substitutions: bool,
+    pub math_substitutions: bool,
 }
 
 impl Default for Settings {
@@ -83,7 +83,7 @@ impl Default for Settings {
             whisper_server_url: None,
             ollama_url: None,
             basic_substitutions: false,
-            peculiar_substitutions: false,
+            math_substitutions: false,
         }
     }
 }
@@ -300,7 +300,7 @@ impl AppState {
         let output = crate::substitutions::apply_substitutions(
             &output,
             self.settings.basic_substitutions,
-            self.settings.peculiar_substitutions,
+            self.settings.math_substitutions,
         );
 
         // Save to history
