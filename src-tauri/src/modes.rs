@@ -13,8 +13,9 @@ use std::path::PathBuf;
 #[serde(rename_all = "lowercase")]
 pub enum SttProvider {
     WhisperCpp,
+    WhisperServer,  // Self-hosted whisper server (Speaches, faster-whisper-server, etc.)
+    OpenAI,         // Cloud OpenAI Whisper API
     Deepgram,
-    OpenAI,
     Custom(String),
 }
 

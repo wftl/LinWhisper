@@ -4,7 +4,7 @@ use crate::error::{AppError, Result};
 use crate::state::{RecordingStatus, SharedState};
 use crate::tray::{update_tray_icon, update_tray_icon_for_level, update_tray_menu};
 use log::info;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 /// Default hotkey for toggling recording
@@ -61,17 +61,20 @@ fn toggle_recording(handle: &AppHandle) {
                     state.stop_recording().await
                 };
 
+                // State resets to Ready on error; make sure UI updates immediately.
+                let state = state_arc.lock().await;
+                let _ = update_tray_icon(&handle, state.status);
+                let _ = update_tray_menu(&handle, &state).await;
+                drop(state);
+
                 match stop_result {
                     Ok(output) => {
                         info!("Recording stopped via hotkey. Output: {} chars", output.len());
-                        let _ = update_tray_icon(&handle, RecordingStatus::Ready);
-                        // Update menu after processing
-                        let state = state_arc.lock().await;
-                        let _ = update_tray_menu(&handle, &state).await;
+                        let _ = handle.emit("recording-complete", &output);
                     }
                     Err(e) => {
                         log::error!("Failed to stop recording: {}", e);
-                        let _ = update_tray_icon(&handle, RecordingStatus::Error);
+                        let _ = handle.emit("recording-error", e.to_string());
                     }
                 }
             } else {

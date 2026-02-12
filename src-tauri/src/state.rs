@@ -3,7 +3,7 @@
 use crate::audio::RecordingHandle;
 use crate::database::{get_audio_dir, get_database_path, Database, HistoryItem};
 use crate::error::{AppError, Result};
-use crate::modes::{load_modes, Mode, LlmProvider as LlmProviderType};
+use crate::modes::{load_modes, Mode, LlmProvider as LlmProviderType, SttProvider as SttProviderType};
 use crate::paste;
 use crate::providers::{llm, stt};
 use chrono::Utc;
@@ -54,6 +54,9 @@ pub struct Settings {
     pub auto_paste: bool,
     pub context_awareness: bool,
     pub language: String,
+    /// URL for self-hosted whisper server (used when stt_provider is WhisperServer)
+    #[serde(default)]
+    pub whisper_server_url: Option<String>,
 }
 
 impl Default for Settings {
@@ -68,6 +71,7 @@ impl Default for Settings {
             auto_paste: true,
             context_awareness: false,
             language: "en".to_string(),
+            whisper_server_url: None,
         }
     }
 }
@@ -235,6 +239,16 @@ impl AppState {
         let samples = crate::audio::stop_recording(&self.recording_handle)?;
         self.status = RecordingStatus::Processing;
 
+        // Helper to reset status on error
+        let result = self.process_recording(samples).await;
+        if result.is_err() {
+            self.status = RecordingStatus::Ready;
+        }
+        result
+    }
+
+    /// Internal: process recorded samples (transcribe, AI, save history)
+    async fn process_recording(&mut self, samples: Vec<f32>) -> Result<String> {
         // Get active mode
         let mode = self
             .get_active_mode()
@@ -309,7 +323,16 @@ impl AppState {
 
     /// Transcribe audio samples
     async fn transcribe(&self, samples: &[f32], mode: &Mode) -> Result<String> {
-        let provider = stt::create_stt_provider(&mode.stt_provider, &mode.stt_model).await?;
+        let api_key = self.get_stt_api_key(&mode.stt_provider)?;
+        let server_url = self.settings.whisper_server_url.clone();
+
+        let provider = stt::create_stt_provider(
+            &mode.stt_provider,
+            &mode.stt_model,
+            api_key,
+            server_url,
+        ).await?;
+
         provider
             .transcribe(samples, Some(&self.settings.language))
             .await
@@ -336,7 +359,7 @@ impl AppState {
         provider.complete(&prompt).await
     }
 
-    /// Get API key for a provider from secure storage
+    /// Get API key for an LLM provider from secure storage
     pub fn get_api_key(&self, provider: &LlmProviderType) -> Result<Option<String>> {
         let service = "whispertray";
         let key_name = match provider {
@@ -351,6 +374,30 @@ impl AppState {
                 Ok(password) => Ok(Some(password)),
                 Err(keyring::Error::NoEntry) => Ok(None),
                 Err(e) => Err(AppError::Keyring(format!("Failed to get API key: {}", e))),
+            },
+            Err(e) => Err(AppError::Keyring(format!(
+                "Failed to access keyring: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Get API key for an STT provider from secure storage
+    pub fn get_stt_api_key(&self, provider: &SttProviderType) -> Result<Option<String>> {
+        let service = "whispertray";
+        let key_name = match provider {
+            SttProviderType::OpenAI => "openai_api_key", // Reuse same key as LLM
+            SttProviderType::Deepgram => "deepgram_api_key",
+            SttProviderType::WhisperCpp => return Ok(None),    // Local, no key needed
+            SttProviderType::WhisperServer => return Ok(None), // Self-hosted, typically no auth
+            SttProviderType::Custom(_) => return Ok(None),
+        };
+
+        match keyring::Entry::new(service, key_name) {
+            Ok(entry) => match entry.get_password() {
+                Ok(password) => Ok(Some(password)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(AppError::Keyring(format!("Failed to get STT API key: {}", e))),
             },
             Err(e) => Err(AppError::Keyring(format!(
                 "Failed to access keyring: {}",

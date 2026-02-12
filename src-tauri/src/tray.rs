@@ -223,12 +223,16 @@ fn handle_menu_event(handle: &AppHandle, id: &str) {
                         match state.stop_recording().await {
                             Ok(output) => {
                                 info!("Recording stopped. Output: {} chars", output.len());
-                                let _ = update_tray_icon(&handle, RecordingStatus::Ready);
+                                let _ = handle.emit("recording-complete", &output);
                             }
                             Err(e) => {
                                 log::error!("Failed to stop recording: {}", e);
+                                let _ = handle.emit("recording-error", e.to_string());
                             }
                         }
+                        // Ensure UI immediately updates to match state (which is reset to Ready on error)
+                        let _ = update_tray_icon(&handle, state.status);
+                        let _ = update_tray_menu(&handle, &state).await;
                     }
                 }
             });
@@ -314,18 +318,22 @@ fn handle_tray_click(handle: &AppHandle) {
 
             if state.is_recording() {
                 // Stop recording
-                match state.stop_recording().await {
+                let result = state.stop_recording().await;
+
+                // Ensure UI immediately updates to match state (which is reset to Ready on error)
+                let _ = update_tray_icon(&handle, state.status);
+                let _ = update_tray_menu(&handle, &state).await;
+
+                match result {
                     Ok(output) => {
                         info!("Recording stopped. Output: {} chars", output.len());
-                        let _ = update_tray_icon(&handle, RecordingStatus::Ready);
-                        let _ = update_tray_menu(&handle, &state).await;
-
                         // Emit event to frontend
                         let _ = handle.emit("recording-complete", &output);
                     }
                     Err(e) => {
                         log::error!("Failed to stop recording: {}", e);
-                        let _ = update_tray_icon(&handle, RecordingStatus::Error);
+                        // Emit error event to frontend so it can sync state
+                        let _ = handle.emit("recording-error", e.to_string());
                     }
                 }
             } else {
