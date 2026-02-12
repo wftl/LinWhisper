@@ -287,6 +287,7 @@ pub async fn reprocess_history_item(
     } else {
         output
     };
+    log::debug!("Post-LLM: {:?}", output);
 
     // Update history item
     item.mode_key = mode_key;
