@@ -258,7 +258,15 @@ pub async fn reprocess_history_item(
     let api_key = state_guard.get_api_key(&mode.llm_provider).map_err(|e| e.to_string())?;
     drop(state_guard);
 
-    // Reprocess
+    // Apply deterministic text substitutions (spoken commands → symbols)
+    log::debug!("Pre-substitution:  {:?}", item.transcript_raw);
+    let output = crate::substitutions::apply_substitutions(
+        &item.transcript_raw, basic_subs, math_subs,
+    );
+    log::debug!("Post-substitution: {:?}", output);
+
+    // Reprocess with LLM (runs after substitutions so it can clean up
+    // orphaned STT punctuation around substituted symbols)
     let output = if mode.ai_processing && !mode.prompt_template.is_empty() {
         let provider = crate::providers::llm::create_llm_provider(
             &mode.llm_provider,
@@ -270,18 +278,15 @@ pub async fn reprocess_history_item(
 
         let prompt = crate::modes::render_prompt(
             &mode.prompt_template,
-            &item.transcript_raw,
+            &output,
             None,
             &language,
         );
 
         provider.complete(&prompt).await.map_err(|e| e.to_string())?
     } else {
-        item.transcript_raw.clone()
+        output
     };
-
-    // Apply deterministic text substitutions (spoken commands → symbols)
-    let output = crate::substitutions::apply_substitutions(&output, basic_subs, math_subs);
 
     // Update history item
     item.mode_key = mode_key;

@@ -282,26 +282,29 @@ impl AppState {
         let transcript = self.transcribe(&samples, &mode).await?;
         log::info!("Transcription complete: {} chars", transcript.len());
 
-        // AI processing if enabled
-        let output = if mode.ai_processing && !mode.prompt_template.is_empty() {
-            log::info!("Starting AI processing...");
-            match self.process_with_llm(&transcript, &mode).await {
-                Ok(result) => result,
-                Err(e) => {
-                    log::warn!("AI processing failed: {}, using raw transcript", e);
-                    transcript.clone()
-                }
-            }
-        } else {
-            transcript.clone()
-        };
-
         // Apply deterministic text substitutions (spoken commands → symbols)
+        log::debug!("Pre-substitution:  {:?}", transcript);
         let output = crate::substitutions::apply_substitutions(
-            &output,
+            &transcript,
             self.settings.basic_substitutions,
             self.settings.math_substitutions,
         );
+        log::debug!("Post-substitution: {:?}", output);
+
+        // AI processing if enabled (runs after substitutions so it can
+        // clean up orphaned STT punctuation around substituted symbols)
+        let output = if mode.ai_processing && !mode.prompt_template.is_empty() {
+            log::info!("Starting AI processing...");
+            match self.process_with_llm(&output, &mode).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log::warn!("AI processing failed: {}, using substituted text", e);
+                    output
+                }
+            }
+        } else {
+            output
+        };
 
         // Save to history
         let history_item = HistoryItem {
