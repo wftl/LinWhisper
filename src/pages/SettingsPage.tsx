@@ -526,6 +526,46 @@ export default function SettingsPage() {
               </p>
             </div>
           </label>
+
+          <label className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              checked={localSettings.llm_only_with_substitutions}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  llm_only_with_substitutions: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">LLM post-processing only when command substitution enabled</span>
+              <p className="text-xs text-gray-500">
+                Skip LLM post-processing (even if enabled in mode) unless basic or math substitutions are active
+              </p>
+            </div>
+          </label>
+
+          <label className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              checked={localSettings.skip_llm_on_empty}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  skip_llm_on_empty: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">Don't send empty strings to LLM</span>
+              <p className="text-xs text-gray-500">
+                Skip LLM post-processing when the transcript is empty or whitespace-only
+              </p>
+            </div>
+          </label>
         </div>
       </section>
 

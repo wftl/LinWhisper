@@ -66,6 +66,12 @@ pub struct Settings {
     /// Replace spoken math/symbol names (alpha → α, for all → ∀, etc.)
     #[serde(default)]
     pub math_substitutions: bool,
+    /// Skip LLM post-processing unless at least one command substitution setting is enabled
+    #[serde(default)]
+    pub llm_only_with_substitutions: bool,
+    /// Skip LLM post-processing when the transcript is empty (whitespace-only)
+    #[serde(default)]
+    pub skip_llm_on_empty: bool,
 }
 
 impl Default for Settings {
@@ -84,6 +90,8 @@ impl Default for Settings {
             ollama_url: None,
             basic_substitutions: false,
             math_substitutions: false,
+            llm_only_with_substitutions: false,
+            skip_llm_on_empty: false,
         }
     }
 }
@@ -293,7 +301,10 @@ impl AppState {
 
         // AI processing if enabled (runs after substitutions so it can
         // clean up orphaned STT punctuation around substituted symbols)
-        let output = if mode.ai_processing && !mode.prompt_template.is_empty() {
+        let subs_active = self.settings.basic_substitutions || self.settings.math_substitutions;
+        let skip_llm = (self.settings.llm_only_with_substitutions && !subs_active)
+            || (self.settings.skip_llm_on_empty && output.trim().is_empty());
+        let output = if mode.ai_processing && !mode.prompt_template.is_empty() && !skip_llm {
             log::info!("Starting AI processing...");
             match self.process_with_llm(&output, &mode).await {
                 Ok(result) => result,

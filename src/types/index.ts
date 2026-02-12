@@ -62,6 +62,8 @@ export interface Settings {
   ollama_url?: string;
   basic_substitutions: boolean;
   math_substitutions: boolean;
+  llm_only_with_substitutions: boolean;
+  skip_llm_on_empty: boolean;
 }
 
 // Recording status response
