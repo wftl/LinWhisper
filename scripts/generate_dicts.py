@@ -8,27 +8,39 @@ Usage:
 
 import argparse
 from pathlib import Path
+from typing import Optional
 
 ESCAPE_STR = "slash"
+
+# When non-None, BASIC dict switches to escape-only mode where commands require
+# the prefix word (e.g., "add comma" → ","). Generates 32 combinations per command
+# to handle Whisper's unpredictable punctuation insertion and pause-induced commas.
+ESCAPE_ONLY_BASIC: Optional[str] = "add"
 
 OUTPUT_PATH = Path(__file__).resolve().parent.parent / "src-tauri" / "src" / "substitution_dicts.rs"
 
 # ──────────────────────────────────────────────
 #  BASIC: spoken punctuation commands → symbols
 # ──────────────────────────────────────────────
-# Each (command, symbol) pair generates TWO entries:
+# When ESCAPE_ONLY_BASIC is None: each (command, symbol) pair generates TWO entries:
 #   "ESCAPE_STR <command>" → "<command>"   (escape hatch)
 #   "<command>"         → "<symbol>"    (the substitution)
+#
+# When ESCAPE_ONLY_BASIC is set (e.g., "add"): generates 32 combinations per command
+# to handle Whisper's unpredictable punctuation insertion and pause-induced commas:
+#   "{ld}add {command}{rd}"  → "<symbol>"   for all ld,rd in ["", ",", ".", " "]
+#   "{ld}add, {command}{rd}" → "<symbol>"   for all ld,rd in ["", ",", ".", " "]
 
 BASIC_COMMANDS = [
     ("comma",             ","),
     ("period",            "."),
     ("tab",               "\t"),
     ("line break",        "\n"),
-    ("open quote",        '"'),
-    ("close quote",       '"'),
+    ("double quote",      '"'),
+    ("single quote",      "'"),
     ("open paren",        "("),
     ("close paren",       ")"),
+    ("closed paren",       ")"),
     ("open bracket",      "["),
     ("close bracket",     "]"),
     ("exclamation point", "!"),
@@ -46,7 +58,7 @@ BASIC_COMMANDS = [
 NO_SPACE_BEFORE = {
     "comma", "period", "exclamation point", "question mark",
     "colon", "semicolon", "close paren", "close bracket",
-    "close quote", "dot dot dot",
+    "dot dot dot",
 }
 
 # Commands where STT may already insert the symbol, so saying the command
@@ -107,35 +119,70 @@ def generate() -> str:
     basic_patterns = []
     basic_replacements = []
 
-    # Escape hatches first ("ESCAPE_STR X" → word X)
-    for cmd, _sym in BASIC_COMMANDS:
-        basic_patterns.append(f"{ESCAPE_STR} {cmd}")
-        basic_replacements.append(cmd)
+    if ESCAPE_ONLY_BASIC is not None:
+        # Escape-only mode: generate all 16 prefix/suffix combinations to handle
+        # Whisper's unpredictable punctuation insertion around spoken commands.
+        # Pattern: "{ld}{ESCAPE_ONLY_BASIC} {keyword}{rd}" → symbol
+        # Also generate "add," variants (32 total) to handle pauses between words.
+        affixes = ["", ",", ".", " "]
+        for cmd, sym in BASIC_COMMANDS:
+            for ld in affixes:
+                for rd in affixes:
+                    # Base pattern: "add <cmd>"
+                    basic_patterns.append(f"{ld}{ESCAPE_ONLY_BASIC} {cmd}{rd}")
+                    basic_replacements.append(sym)
+                    # Pause-handling pattern: "add, <cmd>"
+                    basic_patterns.append(f"{ld}{ESCAPE_ONLY_BASIC}, {cmd}{rd}")
+                    basic_replacements.append(sym)
 
-    # Bare commands ("X" → symbol)
-    # For NO_SPACE_BEFORE commands the pattern includes a leading space so the
-    # Aho-Corasick match consumes it, producing e.g. "hello," instead of "hello ,"
-    for cmd, sym in BASIC_COMMANDS:
-        if cmd in NO_SPACE_BEFORE:
-            basic_patterns.append(f" {cmd}")
-        else:
-            basic_patterns.append(cmd)
-        basic_replacements.append(sym)
+        # Duplicate-prevention: absorb "symbol + spoken command" when STT already
+        # inserted the symbol, e.g. "? add question mark" → "?"
+        # (Only needed for symbols not in affixes list above)
+        sym_of = dict(BASIC_COMMANDS)
+        for cmd in PUNCTUATION_DUP_PREVENT:
+            sym = sym_of[cmd]
+            if sym not in affixes:
+                basic_patterns.append(f"{sym} {ESCAPE_ONLY_BASIC} {cmd}")
+                basic_replacements.append(sym)
+                # Also handle with comma after ESCAPE_ONLY_BASIC
+                basic_patterns.append(f"{sym} {ESCAPE_ONLY_BASIC}, {cmd}")
+                basic_replacements.append(sym)
+    else:
+        # Original mode: bare commands with escape hatches
+        # Escape hatches first ("ESCAPE_STR X" → word X)
+        for cmd, _sym in BASIC_COMMANDS:
+            basic_patterns.append(f"{ESCAPE_STR} {cmd}")
+            basic_replacements.append(cmd)
 
-    # Duplicate-prevention: absorb "symbol + spoken command" when STT already
-    # inserted the punctuation, e.g. ", comma" → ","
-    sym_of = dict(BASIC_COMMANDS)
-    for cmd in PUNCTUATION_DUP_PREVENT:
-        sym = sym_of[cmd]
-        basic_patterns.append(f"{sym} {cmd}")
-        basic_replacements.append(sym)
+        # Bare commands ("X" → symbol)
+        # For NO_SPACE_BEFORE commands the pattern includes a leading space so the
+        # Aho-Corasick match consumes it, producing e.g. "hello," instead of "hello ,"
+        for cmd, sym in BASIC_COMMANDS:
+            if cmd in NO_SPACE_BEFORE:
+                basic_patterns.append(f" {cmd}")
+            else:
+                basic_patterns.append(cmd)
+            basic_replacements.append(sym)
+
+        # Duplicate-prevention: absorb "symbol + spoken command" when STT already
+        # inserted the punctuation, e.g. ", comma" → ","
+        sym_of = dict(BASIC_COMMANDS)
+        for cmd in PUNCTUATION_DUP_PREVENT:
+            sym = sym_of[cmd]
+            basic_patterns.append(f"{sym} {cmd}")
+            basic_replacements.append(sym)
 
     lines.append("#[cfg(test)]")
     lines.append("/// Escape token, for use in Rust tests.")
     lines.append(f'pub(crate) const ESCAPE_STR: &str = "{rust_str(ESCAPE_STR)}";')
 
-    lines.append("/// Basic substitution patterns: spoken punctuation commands.")
-    lines.append(f"/// Includes \"{ESCAPE_STR} X\" escape hatches.")
+    if ESCAPE_ONLY_BASIC is not None:
+        lines.append("/// Basic substitution patterns: escape-only mode.")
+        lines.append(f'/// Requires \"{ESCAPE_ONLY_BASIC} <command>\" prefix, with 32 affix combinations')
+        lines.append("/// to handle Whisper's unpredictable punctuation insertion and pause-induced commas.")
+    else:
+        lines.append("/// Basic substitution patterns: spoken punctuation commands.")
+        lines.append(f"/// Includes \"{ESCAPE_STR} X\" escape hatches.")
     lines.append("pub(crate) static BASIC_PATTERNS: &[&str] = &[")
     for p in basic_patterns:
         lines.append(f'    "{rust_str(p)}",')
