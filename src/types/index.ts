@@ -64,6 +64,7 @@ export interface Settings {
   math_substitutions: boolean;
   llm_only_with_substitutions: boolean;
   skip_llm_on_empty: boolean;
+  enable_llm_postprocessing: boolean;
 }
 
 // Recording status response

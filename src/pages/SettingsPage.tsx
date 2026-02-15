@@ -470,7 +470,28 @@ export default function SettingsPage() {
           <label className="flex items-center gap-3">
             <input
               type="checkbox"
+              checked={localSettings.enable_llm_postprocessing}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  enable_llm_postprocessing: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">Enable LLM post-processing</span>
+              <p className="text-xs text-gray-500">
+                Allow AI post-processing of transcripts (when enabled in the active mode)
+              </p>
+            </div>
+          </label>
+
+          <label className={`flex items-center gap-3 ${!localSettings.enable_llm_postprocessing ? "opacity-50" : ""}`}>
+            <input
+              type="checkbox"
               checked={localSettings.context_awareness}
+              disabled={!localSettings.enable_llm_postprocessing}
               onChange={(e) =>
                 setLocalSettings({
                   ...localSettings,
@@ -527,10 +548,11 @@ export default function SettingsPage() {
             </div>
           </label>
 
-          <label className="flex items-center gap-3">
+          <label className={`flex items-center gap-3 ${!localSettings.enable_llm_postprocessing ? "opacity-50" : ""}`}>
             <input
               type="checkbox"
               checked={localSettings.llm_only_with_substitutions}
+              disabled={!localSettings.enable_llm_postprocessing}
               onChange={(e) =>
                 setLocalSettings({
                   ...localSettings,
@@ -547,10 +569,11 @@ export default function SettingsPage() {
             </div>
           </label>
 
-          <label className="flex items-center gap-3">
+          <label className={`flex items-center gap-3 ${!localSettings.enable_llm_postprocessing ? "opacity-50" : ""}`}>
             <input
               type="checkbox"
               checked={localSettings.skip_llm_on_empty}
+              disabled={!localSettings.enable_llm_postprocessing}
               onChange={(e) =>
                 setLocalSettings({
                   ...localSettings,

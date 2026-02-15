@@ -72,6 +72,13 @@ pub struct Settings {
     /// Skip LLM post-processing when the transcript is empty (whitespace-only)
     #[serde(default)]
     pub skip_llm_on_empty: bool,
+    /// Global override: disable LLM post-processing regardless of mode settings
+    #[serde(default = "default_true")]
+    pub enable_llm_postprocessing: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -92,6 +99,7 @@ impl Default for Settings {
             math_substitutions: false,
             llm_only_with_substitutions: false,
             skip_llm_on_empty: false,
+            enable_llm_postprocessing: true,
         }
     }
 }
@@ -302,7 +310,8 @@ impl AppState {
         // AI processing if enabled (runs after substitutions so it can
         // clean up orphaned STT punctuation around substituted symbols)
         let subs_active = self.settings.basic_substitutions || self.settings.math_substitutions;
-        let skip_llm = (self.settings.llm_only_with_substitutions && !subs_active)
+        let skip_llm = !self.settings.enable_llm_postprocessing
+            || (self.settings.llm_only_with_substitutions && !subs_active)
             || (self.settings.skip_llm_on_empty && output.trim().is_empty());
         let output = if mode.ai_processing && !mode.prompt_template.is_empty() && !skip_llm {
             log::info!("Starting AI processing...");

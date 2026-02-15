@@ -257,6 +257,7 @@ pub async fn reprocess_history_item(
     let math_subs = state_guard.settings.math_substitutions;
     let llm_only_with_subs = state_guard.settings.llm_only_with_substitutions;
     let skip_llm_on_empty = state_guard.settings.skip_llm_on_empty;
+    let enable_llm_postprocessing = state_guard.settings.enable_llm_postprocessing;
     let api_key = state_guard.get_api_key(&mode.llm_provider).map_err(|e| e.to_string())?;
     drop(state_guard);
 
@@ -270,7 +271,8 @@ pub async fn reprocess_history_item(
     // Reprocess with LLM (runs after substitutions so it can clean up
     // orphaned STT punctuation around substituted symbols)
     let subs_active = basic_subs || math_subs;
-    let skip_llm = (llm_only_with_subs && !subs_active)
+    let skip_llm = !enable_llm_postprocessing
+        || (llm_only_with_subs && !subs_active)
         || (skip_llm_on_empty && output.trim().is_empty());
     let output = if mode.ai_processing && !mode.prompt_template.is_empty() && !skip_llm {
         let provider = crate::providers::llm::create_llm_provider(
