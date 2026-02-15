@@ -364,7 +364,13 @@ fn handle_tray_click(handle: &AppHandle) {
 /// Show a window
 fn show_window(handle: &AppHandle, label: &str) {
     if let Some(window) = handle.get_webview_window(label) {
+        info!("show_window: found '{}', calling show + set_focus", label);
         let _ = window.show();
         let _ = window.set_focus();
+    } else {
+        log::error!(
+            "show_window: window '{}' not found! Was it destroyed instead of hidden?",
+            label
+        );
     }
 }

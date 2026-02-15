@@ -85,6 +85,19 @@ pub fn run() {
             info!("Application setup complete");
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // For the main window, hide instead of destroy on close so the
+            // tray menu can re-show it later. Without this, closing the
+            // window destroys it and subsequent show_window() calls silently
+            // fail because get_webview_window("main") returns None.
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    info!("Main window hidden (close intercepted)");
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::start_recording,
             commands::stop_recording,
