@@ -528,6 +528,7 @@ export default function SettingsPage() {
             </div>
           </label>
 
+          {import.meta.env.VITE_EXPERIMENTAL && (
           <label className="flex items-center gap-3">
             <input
               type="checkbox"
@@ -547,6 +548,8 @@ export default function SettingsPage() {
               </p>
             </div>
           </label>
+          )}
+
 
           <label className={`flex items-center gap-3 ${!localSettings.enable_llm_postprocessing ? "opacity-50" : ""}`}>
             <input
