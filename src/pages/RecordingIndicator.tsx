@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 
 interface AudioLevel {
@@ -8,46 +8,30 @@ interface AudioLevel {
 
 export default function RecordingIndicator() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [levels, setLevels] = useState<number[]>(new Array(30).fill(0));
+  // Store levels in a ref so the draw function always has the latest value
+  // without needing to go through React state on every audio event.
+  const levelsRef = useRef<number[]>(new Array(30).fill(0));
+  const isProcessingRef = useRef(false);
+  const animFrameRef = useRef<number>(0);
+  // Only used to trigger the RAF loop on/off — not for drawing.
   const [isProcessing, setIsProcessing] = useState(false);
 
-  useEffect(() => {
-    // Listen for audio level updates
-    const unlisten = listen<AudioLevel>('audio-level', (event) => {
-      setLevels(prev => {
-        const newLevels = [...prev.slice(1), event.payload.level];
-        return newLevels;
-      });
-    });
-
-    // Listen for processing state
-    const unlistenProcessing = listen<boolean>('recording-processing', (event) => {
-      setIsProcessing(event.payload);
-    });
-
-    return () => {
-      unlisten.then(fn => fn());
-      unlistenProcessing.then(fn => fn());
-    };
-  }, []);
-
-  useEffect(() => {
+  const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    const levels = levelsRef.current;
+    const processing = isProcessingRef.current;
     const width = canvas.width;
     const height = canvas.height;
     const barWidth = width / levels.length;
     const gap = 2;
 
-    // Clear canvas
     ctx.clearRect(0, 0, width, height);
 
-    if (isProcessing) {
-      // Show processing animation
+    if (processing) {
       ctx.fillStyle = '#3b82f6';
       const time = Date.now() / 200;
       for (let i = 0; i < levels.length; i++) {
@@ -57,7 +41,6 @@ export default function RecordingIndicator() {
         ctx.fillRect(x, y, barWidth - gap, h);
       }
     } else {
-      // Show audio waveform
       ctx.fillStyle = '#ef4444';
       levels.forEach((level, i) => {
         const h = Math.max(4, level * height * 0.9);
@@ -66,18 +49,44 @@ export default function RecordingIndicator() {
         ctx.fillRect(x, y, barWidth - gap, h);
       });
     }
-  }, [levels, isProcessing]);
+  }, []);
 
-  // Animation loop for processing state
   useEffect(() => {
-    if (!isProcessing) return;
+    // Audio level updates: mutate the ref and redraw directly — no React state.
+    const unlisten = listen<AudioLevel>('audio-level', (event) => {
+      levelsRef.current = [...levelsRef.current.slice(1), event.payload.level];
+      if (!isProcessingRef.current) {
+        drawCanvas();
+      }
+    });
 
-    const interval = setInterval(() => {
-      setLevels(prev => [...prev]); // Force re-render
-    }, 50);
+    const unlistenProcessing = listen<boolean>('recording-processing', (event) => {
+      isProcessingRef.current = event.payload;
+      setIsProcessing(event.payload);
+    });
 
-    return () => clearInterval(interval);
-  }, [isProcessing]);
+    return () => {
+      unlisten.then(fn => fn());
+      unlistenProcessing.then(fn => fn());
+    };
+  }, [drawCanvas]);
+
+  // Use requestAnimationFrame for the processing animation instead of setInterval
+  // so we're synced to the display refresh rate and avoid forcing React re-renders.
+  useEffect(() => {
+    if (!isProcessing) {
+      cancelAnimationFrame(animFrameRef.current);
+      return;
+    }
+
+    const animate = () => {
+      drawCanvas();
+      animFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    animFrameRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(animFrameRef.current);
+  }, [isProcessing, drawCanvas]);
 
   return (
     <div

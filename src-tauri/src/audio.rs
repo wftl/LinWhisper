@@ -7,7 +7,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use hound::{SampleFormat as HoundSampleFormat, WavSpec, WavWriter};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Audio sample rate for whisper.cpp (16kHz required)
@@ -66,10 +66,11 @@ pub struct RecordingHandle {
     samples: Arc<Mutex<Vec<f32>>>,
     /// Recording flag
     is_recording: Arc<AtomicBool>,
-    /// Current audio level (RMS, 0.0 to 1.0)
-    current_level: Arc<Mutex<f32>>,
-    /// Peak level
-    peak_level: Arc<Mutex<f32>>,
+    /// Current audio level (RMS, 0.0–1.0) stored as f32 bits in an AtomicU32
+    /// so the hot audio callback never needs a lock.
+    current_level: Arc<AtomicU32>,
+    /// Peak level, same encoding as current_level.
+    peak_level: Arc<AtomicU32>,
 }
 
 impl RecordingHandle {
@@ -77,8 +78,8 @@ impl RecordingHandle {
         Self {
             samples: Arc::new(Mutex::new(Vec::new())),
             is_recording: Arc::new(AtomicBool::new(false)),
-            current_level: Arc::new(Mutex::new(0.0)),
-            peak_level: Arc::new(Mutex::new(0.0)),
+            current_level: Arc::new(AtomicU32::new(0)),
+            peak_level: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -106,7 +107,7 @@ impl RecordingHandle {
         }
     }
 
-    /// Update audio level from new samples
+    /// Update audio level from new samples (lock-free).
     pub fn update_level(&self, new_samples: &[f32]) {
         if new_samples.is_empty() {
             return;
@@ -120,20 +121,17 @@ impl RecordingHandle {
         let level = (rms * 3.0).min(1.0);
 
         // Find peak
-        let peak = new_samples.iter().map(|s| s.abs()).fold(0.0f32, |a, b| a.max(b));
+        let peak = new_samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
 
-        if let Ok(mut l) = self.current_level.lock() {
-            *l = level;
-        }
-        if let Ok(mut p) = self.peak_level.lock() {
-            *p = peak.min(1.0);
-        }
+        // Relaxed ordering is fine: readers only need an approximately current value.
+        self.current_level.store(level.to_bits(), Ordering::Relaxed);
+        self.peak_level.store(peak.min(1.0).to_bits(), Ordering::Relaxed);
     }
 
-    /// Get current audio level
+    /// Get current audio level (lock-free).
     pub fn get_level(&self) -> (f32, f32) {
-        let level = self.current_level.lock().map(|l| *l).unwrap_or(0.0);
-        let peak = self.peak_level.lock().map(|p| *p).unwrap_or(0.0);
+        let level = f32::from_bits(self.current_level.load(Ordering::Relaxed));
+        let peak = f32::from_bits(self.peak_level.load(Ordering::Relaxed));
         (level, peak)
     }
 }

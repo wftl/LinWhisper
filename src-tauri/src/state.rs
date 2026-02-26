@@ -97,6 +97,11 @@ pub struct AppState {
 
     /// Last context (clipboard text)
     pub last_context: Option<String>,
+
+    /// Cached STT provider — avoids reloading the model on every transcription.
+    stt_provider: Option<Box<dyn stt::SttProvider>>,
+    /// Key identifying which provider/model is currently cached.
+    stt_provider_key: String,
 }
 
 impl AppState {
@@ -113,6 +118,8 @@ impl AppState {
             database: None,
             settings,
             last_context: None,
+            stt_provider: None,
+            stt_provider_key: String::new(),
         })
     }
 
@@ -307,10 +314,20 @@ impl AppState {
         Ok(output)
     }
 
-    /// Transcribe audio samples
-    async fn transcribe(&self, samples: &[f32], mode: &Mode) -> Result<String> {
-        let provider = stt::create_stt_provider(&mode.stt_provider, &mode.stt_model).await?;
-        provider
+    /// Transcribe audio samples, reusing a cached provider when the model is unchanged.
+    async fn transcribe(&mut self, samples: &[f32], mode: &Mode) -> Result<String> {
+        let provider_key = format!("{:?}:{}", mode.stt_provider, mode.stt_model);
+
+        if self.stt_provider.is_none() || self.stt_provider_key != provider_key {
+            log::info!("Loading STT provider: {}", provider_key);
+            let provider = stt::create_stt_provider(&mode.stt_provider, &mode.stt_model).await?;
+            self.stt_provider = Some(provider);
+            self.stt_provider_key = provider_key;
+        }
+
+        self.stt_provider
+            .as_ref()
+            .unwrap()
             .transcribe(samples, Some(&self.settings.language))
             .await
     }
