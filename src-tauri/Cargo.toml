@@ -86,6 +86,9 @@ default = ["x11"]
 x11 = ["xcb"]
 wayland = ["wayland-client"]
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 strip = true
 lto = true
