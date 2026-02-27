@@ -1,4 +1,4 @@
-//! WhisperTray - A tray-based dictation tool for Linux
+//! WhisperTray - A tray-based dictation tool
 //!
 //! This application provides voice-to-text transcription with optional
 //! AI post-processing, all accessible from the system tray.
@@ -20,6 +20,52 @@ use state::AppState;
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
+
+/// Register WhisperTray to launch at Windows login.
+///
+/// Uses HKCU so no UAC prompt is required.
+/// Only runs in release builds — dev runs are skipped so the registry
+/// never points at a temporary debug binary.
+#[cfg(windows)]
+fn register_startup() {
+    #[cfg(not(debug_assertions))]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            let exe_str = exe.to_string_lossy();
+            match std::process::Command::new("reg")
+                .args([
+                    "add",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                    "/v",
+                    "WhisperTray",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &format!("\"{}\"", exe_str),
+                    "/f",
+                ])
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    log::info!("WhisperTray registered for startup at login");
+                }
+                Ok(out) => {
+                    log::warn!(
+                        "Startup registration failed: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                Err(e) => log::warn!("Startup registration error: {}", e),
+            }
+        }
+    }
+    // debug builds: do nothing
+    #[cfg(debug_assertions)]
+    log::debug!("Startup registration skipped in debug build");
+}
+
+#[cfg(not(windows))]
+fn register_startup() {} // no-op on Linux/macOS
 
 /// Initialize and run the Tauri application
 pub fn run() {
@@ -74,6 +120,9 @@ pub fn run() {
                     log::error!("Failed to initialize database: {}", e);
                 }
             });
+
+            // Register for Windows startup (release builds only)
+            register_startup();
 
             info!("Application setup complete");
             Ok(())
