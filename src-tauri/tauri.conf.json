@@ -11,10 +11,6 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "trayIcon": {
-      "iconPath": "icons/tray-green.png",
-      "iconAsTemplate": false
-    },
     "windows": [
       {
         "title": "WhisperTray",
@@ -49,7 +45,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb"],
+    "targets": ["appimage", "deb", "nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -64,6 +60,9 @@
       "deb": {
         "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libayatana-appindicator3-1"]
       }
+    },
+    "windows": {
+      "nsis": {}
     }
   },
   "plugins": {
