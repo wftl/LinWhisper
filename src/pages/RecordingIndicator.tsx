@@ -11,6 +11,34 @@ export default function RecordingIndicator() {
   const [levels, setLevels] = useState<number[]>(new Array(30).fill(0));
   const [isProcessing, setIsProcessing] = useState(false);
 
+  // This window is 200×60px — kill any overflow that would show scrollbars
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    html.style.overflow = 'hidden';
+    html.style.background = 'transparent';
+    body.style.overflow = 'hidden';
+    body.style.margin = '0';
+    body.style.padding = '0';
+    body.style.minWidth = '0';
+    body.style.minHeight = '0';
+    body.style.width = '100vw';
+    body.style.height = '100vh';
+    body.style.background = 'transparent';
+    return () => {
+      html.style.overflow = '';
+      html.style.background = '';
+      body.style.overflow = '';
+      body.style.margin = '';
+      body.style.padding = '';
+      body.style.minWidth = '';
+      body.style.minHeight = '';
+      body.style.width = '';
+      body.style.height = '';
+      body.style.background = '';
+    };
+  }, []);
+
   useEffect(() => {
     // Listen for audio level updates
     const unlisten = listen<AudioLevel>('audio-level', (event) => {

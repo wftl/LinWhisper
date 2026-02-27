@@ -13,18 +13,29 @@ pub struct AudioLevel {
     pub peak: f32,
 }
 
+/// Centre the indicator window at the top of the current monitor.
+fn centre_indicator(window: &tauri::WebviewWindow) {
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let screen = monitor.size();
+        let scale = monitor.scale_factor();
+        // Window logical size is 200×60; convert to physical pixels
+        let pw = (200.0 * scale) as i32;
+        let x = (screen.width as i32 - pw) / 2;
+        let y = (50.0 * scale) as i32;
+        let _ = window.set_position(tauri::Position::Physical(
+            tauri::PhysicalPosition::new(x, y),
+        ));
+    }
+}
+
 /// Show the recording indicator window
 pub fn show_indicator(handle: &AppHandle) -> Result<()> {
-    // Try to get existing window or create new one
-    if let Some(window) = handle.get_webview_window(INDICATOR_LABEL) {
-        // Navigate to the recording route and show
-        let _ = window.eval("window.location.href = '/recording'");
-        let _ = window.show();
-        let _ = window.set_focus();
-        info!("Recording indicator shown");
+    // The window is pre-created by tauri.conf.json (visible: false).
+    // If it somehow doesn't exist yet, create it on demand.
+    let window = if let Some(w) = handle.get_webview_window(INDICATOR_LABEL) {
+        w
     } else {
-        // Create the window if it doesn't exist
-        let window = WebviewWindowBuilder::new(
+        WebviewWindowBuilder::new(
             handle,
             INDICATOR_LABEL,
             WebviewUrl::App("/recording".into()),
@@ -36,24 +47,16 @@ pub fn show_indicator(handle: &AppHandle) -> Result<()> {
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
-        .visible(true)
-        .build()?;
+        .visible(false)
+        .build()?
+    };
 
-        // Position near top-center of screen
-        if let Ok(monitor) = window.current_monitor() {
-            if let Some(monitor) = monitor {
-                let size = monitor.size();
-                let x = (size.width as i32 - 200) / 2;
-                let y = 50;
-                let _ = window.set_position(tauri::Position::Physical(
-                    tauri::PhysicalPosition::new(x, y),
-                ));
-            }
-        }
+    // Always re-centre (position from tauri.conf.json is just a placeholder)
+    centre_indicator(&window);
 
-        info!("Recording indicator window created");
-    }
-
+    let _ = window.show();
+    let _ = window.set_focus();
+    info!("Recording indicator shown");
     Ok(())
 }
 
