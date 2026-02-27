@@ -20,22 +20,15 @@ pub fn setup_hotkey(app: &tauri::App) -> Result<()> {
 
     info!("Registering global hotkey: {}", DEFAULT_HOTKEY);
 
-    // Register the shortcut
-    app.handle().plugin(
-        tauri_plugin_global_shortcut::Builder::new()
-            .with_handler(move |_app, shortcut_ref, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    info!("Hotkey pressed: {:?}", shortcut_ref);
-                    toggle_recording(&handle);
-                }
-            })
-            .build(),
-    )?;
-
-    // Register the specific shortcut
+    // Wire up the handler (plugin already registered in Builder)
     app.global_shortcut()
-        .register(shortcut)
-        .map_err(|e| AppError::Config(format!("Failed to register hotkey: {}", e)))?;
+        .on_shortcut(shortcut.clone(), move |_app, _shortcut_ref, event| {
+            if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                info!("Hotkey pressed");
+                toggle_recording(&handle);
+            }
+        })
+        .map_err(|e| AppError::Config(format!("Failed to set hotkey handler: {}", e)))?;
 
     info!("Global hotkey registered successfully");
     Ok(())
@@ -54,9 +47,9 @@ fn toggle_recording(handle: &AppHandle) {
 
             if is_recording {
                 // Stop recording - get data quickly, then release lock for processing
+                let _ = crate::indicator::hide_indicator(&handle);
                 let stop_result = {
                     let mut state = state_arc.lock().await;
-                    // Immediately show processing state
                     let _ = update_tray_icon(&handle, RecordingStatus::Processing);
                     state.stop_recording().await
                 };
@@ -65,7 +58,6 @@ fn toggle_recording(handle: &AppHandle) {
                     Ok(output) => {
                         info!("Recording stopped via hotkey. Output: {} chars", output.len());
                         let _ = update_tray_icon(&handle, RecordingStatus::Ready);
-                        // Update menu after processing
                         let state = state_arc.lock().await;
                         let _ = update_tray_menu(&handle, &state).await;
                     }
@@ -93,6 +85,7 @@ fn toggle_recording(handle: &AppHandle) {
 
                 match start_result {
                     Ok(()) => {
+                        let _ = crate::indicator::show_indicator(&handle);
                         info!("Recording started via hotkey");
                     }
                     Err(e) => {

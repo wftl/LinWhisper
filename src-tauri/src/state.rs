@@ -3,7 +3,7 @@
 use crate::audio::RecordingHandle;
 use crate::database::{get_audio_dir, get_database_path, Database, HistoryItem};
 use crate::error::{AppError, Result};
-use crate::modes::{load_modes, Mode, LlmProvider as LlmProviderType};
+use crate::modes::{load_modes, Mode, LlmProvider as LlmProviderType, SttProvider as SttProviderType};
 use crate::paste;
 use crate::providers::{llm, stt};
 use chrono::Utc;
@@ -97,6 +97,12 @@ pub struct AppState {
 
     /// Last context (clipboard text)
     pub last_context: Option<String>,
+
+    /// Cached whisper.cpp context (reused across recordings to avoid reloading the model)
+    pub whisper_cache: Option<stt::WhisperCache>,
+
+    /// Model name currently loaded in `whisper_cache`
+    cached_model_name: String,
 }
 
 impl AppState {
@@ -113,6 +119,8 @@ impl AppState {
             database: None,
             settings,
             last_context: None,
+            whisper_cache: None,
+            cached_model_name: String::new(),
         })
     }
 
@@ -307,12 +315,41 @@ impl AppState {
         Ok(output)
     }
 
-    /// Transcribe audio samples
-    async fn transcribe(&self, samples: &[f32], mode: &Mode) -> Result<String> {
-        let provider = stt::create_stt_provider(&mode.stt_provider, &mode.stt_model).await?;
-        provider
-            .transcribe(samples, Some(&self.settings.language))
-            .await
+    /// Transcribe audio samples.
+    ///
+    /// For whisper.cpp, a `WhisperCache` keeps the model loaded between calls
+    /// so the 147 MB+ model is only loaded once (or when the model name changes).
+    /// All other providers create a fresh provider on each call.
+    async fn transcribe(&mut self, samples: &[f32], mode: &Mode) -> Result<String> {
+        match &mode.stt_provider {
+            SttProviderType::WhisperCpp => {
+                // Lazy-init or reinit if the model has changed
+                if self.whisper_cache.is_none() || self.cached_model_name != mode.stt_model {
+                    log::info!(
+                        "Initializing WhisperCache for model '{}' (was: '{}')",
+                        mode.stt_model,
+                        self.cached_model_name
+                    );
+                    let model_path = stt::ensure_model(&mode.stt_model).await?;
+                    self.whisper_cache =
+                        Some(stt::WhisperCache::new(model_path, mode.stt_model.clone())?);
+                    self.cached_model_name = mode.stt_model.clone();
+                }
+
+                let cache = self.whisper_cache.as_ref().unwrap();
+                cache
+                    .transcribe(samples.to_vec(), Some(self.settings.language.clone()))
+                    .await
+            }
+            _ => {
+                // Non-whispercpp providers: create a fresh provider per call
+                let provider =
+                    stt::create_stt_provider(&mode.stt_provider, &mode.stt_model).await?;
+                provider
+                    .transcribe(samples, Some(&self.settings.language))
+                    .await
+            }
+        }
     }
 
     /// Process transcript with LLM

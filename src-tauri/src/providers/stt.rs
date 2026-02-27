@@ -36,50 +36,10 @@ impl SttProvider for WhisperCppProvider {
         let language = language.map(|s| s.to_string());
 
         let result = tokio::task::spawn_blocking(move || {
-            // Create context for transcription
             let params = WhisperContextParameters::default();
             let ctx = WhisperContext::new_with_params(model_path.to_str().unwrap(), params)
                 .map_err(|e| AppError::Transcription(format!("Failed to create context: {}", e)))?;
-
-            let mut state = ctx
-                .create_state()
-                .map_err(|e| AppError::Transcription(format!("Failed to create state: {}", e)))?;
-
-            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-
-            // Set language if specified
-            if let Some(lang) = language.as_deref() {
-                params.set_language(Some(lang));
-            } else {
-                params.set_language(Some("en"));
-            }
-
-            // Disable timestamps for cleaner output
-            params.set_print_special(false);
-            params.set_print_progress(false);
-            params.set_print_realtime(false);
-            params.set_print_timestamps(false);
-
-            // Run transcription
-            state
-                .full(params, &samples)
-                .map_err(|e| AppError::Transcription(format!("Transcription failed: {}", e)))?;
-
-            // Collect segments
-            let num_segments = state.full_n_segments().map_err(|e| {
-                AppError::Transcription(format!("Failed to get segments: {}", e))
-            })?;
-
-            let mut text = String::new();
-            for i in 0..num_segments {
-                if let Ok(segment) = state.full_get_segment_text(i) {
-                    if !is_whisper_artifact(segment.trim()) {
-                        text.push_str(&segment);
-                    }
-                }
-            }
-
-            Ok::<String, AppError>(text.trim().to_string())
+            run_inference(&ctx, &samples, language.as_deref())
         })
         .await
         .map_err(|e| AppError::Transcription(format!("Task failed: {}", e)))??;
@@ -89,6 +49,132 @@ impl SttProvider for WhisperCppProvider {
 
     fn name(&self) -> &str {
         "whisper.cpp"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared inference kernel
+// ---------------------------------------------------------------------------
+
+/// Run a full whisper inference pass on an already-loaded context.
+/// This is called both by `WhisperCppProvider` and by the `WhisperCache` thread.
+fn run_inference(ctx: &WhisperContext, samples: &[f32], language: Option<&str>) -> Result<String> {
+    let mut state = ctx
+        .create_state()
+        .map_err(|e| AppError::Transcription(format!("Failed to create state: {}", e)))?;
+
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+    if let Some(lang) = language {
+        params.set_language(Some(lang));
+    } else {
+        params.set_language(Some("en"));
+    }
+
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+
+    state
+        .full(params, samples)
+        .map_err(|e| AppError::Transcription(format!("Transcription failed: {}", e)))?;
+
+    let num_segments = state
+        .full_n_segments()
+        .map_err(|e| AppError::Transcription(format!("Failed to get segments: {}", e)))?;
+
+    let mut text = String::new();
+    for i in 0..num_segments {
+        if let Ok(segment) = state.full_get_segment_text(i) {
+            if !is_whisper_artifact(segment.trim()) {
+                text.push_str(&segment);
+            }
+        }
+    }
+
+    Ok(text.trim().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Persistent WhisperContext cache
+// ---------------------------------------------------------------------------
+
+/// Sent through the mpsc channel to the worker thread.
+struct WhisperJob {
+    samples: Vec<f32>,
+    language: Option<String>,
+    reply_tx: std::sync::mpsc::Sender<Result<String>>,
+}
+
+/// A long-lived whisper.cpp context that persists between recordings.
+///
+/// A dedicated OS thread owns the `WhisperContext` (which is `!Send`) and
+/// processes one inference job at a time via a bounded mpsc channel.
+/// Callers interact through the async [`WhisperCache::transcribe`] method.
+pub struct WhisperCache {
+    tx: std::sync::mpsc::SyncSender<WhisperJob>,
+    /// Name of the model currently loaded.
+    pub model_name: String,
+}
+
+impl WhisperCache {
+    /// Spawn the background thread and load the model.
+    ///
+    /// Returns an error only if the channel or thread can't be created;
+    /// model-load errors are logged inside the thread (the first `transcribe`
+    /// call will return an error if the model failed to load).
+    pub fn new(model_path: PathBuf, model_name: String) -> Result<Self> {
+        // Capacity 1: the caller always waits for a reply before sending again,
+        // so the queue never needs to be deeper.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WhisperJob>(1);
+
+        std::thread::spawn(move || {
+            log::info!("WhisperCache: loading model from {:?}", model_path);
+            let ctx_params = WhisperContextParameters::default();
+            let ctx = match WhisperContext::new_with_params(
+                model_path.to_str().unwrap_or(""),
+                ctx_params,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("WhisperCache: failed to load model: {}", e);
+                    return; // thread exits; senders will get a SendError next call
+                }
+            };
+            log::info!("WhisperCache: model loaded, waiting for jobs");
+
+            while let Ok(job) = rx.recv() {
+                let result = run_inference(&ctx, &job.samples, job.language.as_deref());
+                let _ = job.reply_tx.send(result);
+            }
+            log::info!("WhisperCache: shutting down");
+        });
+
+        Ok(Self { tx, model_name })
+    }
+
+    /// Submit an inference job and await the result.
+    ///
+    /// Sends the job to the background thread via a blocking channel, so this
+    /// method offloads the blocking `recv` into `spawn_blocking`.
+    pub async fn transcribe(&self, samples: Vec<f32>, language: Option<String>) -> Result<String> {
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            tx.send(WhisperJob {
+                samples,
+                language,
+                reply_tx,
+            })
+            .map_err(|_| AppError::Transcription("Whisper worker disconnected".to_string()))?;
+
+            reply_rx
+                .recv()
+                .map_err(|_| AppError::Transcription("Whisper worker did not reply".to_string()))?
+        })
+        .await
+        .map_err(|e| AppError::Transcription(format!("Task join failed: {}", e)))?
     }
 }
 

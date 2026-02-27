@@ -309,18 +309,28 @@ fn handle_menu_event(handle: &AppHandle, id: &str) {
 fn handle_tray_click(handle: &AppHandle) {
     let handle = handle.clone();
     tauri::async_runtime::spawn(async move {
-        if let Some(state) = handle.try_state::<crate::state::SharedState>() {
-            let mut state = state.lock().await;
+        if let Some(state_arc) = handle.try_state::<crate::state::SharedState>() {
+            // Check recording state with minimal lock time
+            let is_recording = {
+                let state = state_arc.lock().await;
+                state.is_recording()
+            };
 
-            if state.is_recording() {
-                // Stop recording
-                match state.stop_recording().await {
+            if is_recording {
+                // Hide indicator immediately, then stop
+                let _ = crate::indicator::hide_indicator(&handle);
+                let stop_result = {
+                    let mut state = state_arc.lock().await;
+                    let _ = update_tray_icon(&handle, RecordingStatus::Processing);
+                    state.stop_recording().await
+                };
+
+                match stop_result {
                     Ok(output) => {
                         info!("Recording stopped. Output: {} chars", output.len());
                         let _ = update_tray_icon(&handle, RecordingStatus::Ready);
+                        let state = state_arc.lock().await;
                         let _ = update_tray_menu(&handle, &state).await;
-
-                        // Emit event to frontend
                         let _ = handle.emit("recording-complete", &output);
                     }
                     Err(e) => {
@@ -329,14 +339,26 @@ fn handle_tray_click(handle: &AppHandle) {
                     }
                 }
             } else {
-                // Start recording
-                match state.start_recording() {
-                    Ok(()) => {
-                        info!("Recording started");
+                // Start recording with level callback for live tray-icon feedback
+                let handle_for_callback = handle.clone();
+                let level_callback: crate::audio::LevelCallback = Box::new(move |level| {
+                    let _ = update_tray_icon_for_level(&handle_for_callback, level);
+                });
+
+                let start_result = {
+                    let mut state = state_arc.lock().await;
+                    let result = state.start_recording_with_callback(Some(level_callback));
+                    if result.is_ok() {
                         let _ = update_tray_icon(&handle, RecordingStatus::Recording);
                         let _ = update_tray_menu(&handle, &state).await;
+                    }
+                    result
+                };
 
-                        // Emit event to frontend
+                match start_result {
+                    Ok(()) => {
+                        let _ = crate::indicator::show_indicator(&handle);
+                        info!("Recording started");
                         let _ = handle.emit("recording-started", ());
                     }
                     Err(e) => {
