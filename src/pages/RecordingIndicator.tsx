@@ -109,18 +109,20 @@ export default function RecordingIndicator() {
 
   return (
     <div
-      className="w-full h-full flex items-center justify-center rounded-lg"
+      className="w-screen h-screen flex items-center justify-center rounded-lg"
       style={{
         background: 'rgba(0, 0, 0, 0.85)',
         backdropFilter: 'blur(10px)',
       }}
       data-tauri-drag-region
     >
+      {/* data-tauri-drag-region on the canvas too so the whole pill drags */}
       <canvas
         ref={canvasRef}
         width={180}
         height={40}
         className="rounded"
+        data-tauri-drag-region
       />
     </div>
   );

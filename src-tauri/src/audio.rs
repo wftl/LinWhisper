@@ -116,8 +116,10 @@ impl RecordingHandle {
         let sum_sq: f32 = new_samples.iter().map(|s| s * s).sum();
         let rms = (sum_sq / new_samples.len() as f32).sqrt();
 
-        // Scale to 0-1 range (typical speech is around 0.1-0.3 RMS)
-        let level = (rms * 3.0).min(1.0);
+        // Scale to 0-1 range. Condenser mics at conversational distance
+        // typically produce 0.02–0.08 RMS, so multiply by 10 to put
+        // normal speech in the 0.2–0.8 range for a responsive meter.
+        let level = (rms * 10.0).min(1.0);
 
         // Find peak
         let peak = new_samples.iter().map(|s| s.abs()).fold(0.0f32, |a, b| a.max(b));

@@ -71,6 +71,7 @@ fn toggle_recording(handle: &AppHandle) {
                 let handle_for_callback = handle.clone();
                 let level_callback: crate::audio::LevelCallback = Box::new(move |level| {
                     let _ = update_tray_icon_for_level(&handle_for_callback, level);
+                    crate::indicator::emit_audio_level(&handle_for_callback, level, level);
                 });
 
                 let start_result = {

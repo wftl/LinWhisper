@@ -23,20 +23,6 @@
         "visible": false,
         "center": true,
         "decorations": true
-      },
-      {
-        "title": "",
-        "label": "recording",
-        "width": 200,
-        "height": 60,
-        "resizable": false,
-        "visible": false,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "x": 100,
-        "y": 100
       }
     ],
     "security": {
