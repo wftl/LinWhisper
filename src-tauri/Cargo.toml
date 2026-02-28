@@ -1,7 +1,7 @@
 [package]
 name = "whispertray"
-version = "0.1.0"
-description = "A tray-based dictation tool for Linux"
+version = "0.2.0"
+description = "A tray-based dictation tool"
 authors = ["WhisperTray Contributors"]
 license = "MIT"
 repository = ""
@@ -77,12 +77,13 @@ keyring = "2"
 arboard = "3"
 enigo = "0.2"
 
-# X11/Wayland window info
+# X11/Wayland window info (Linux only)
+[target.'cfg(target_os = "linux")'.dependencies]
 xcb = { version = "1", optional = true }
 wayland-client = { version = "0.31", optional = true }
 
 [features]
-default = ["x11"]
+default = []
 x11 = ["xcb"]
 wayland = ["wayland-client"]
 
