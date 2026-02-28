@@ -252,13 +252,14 @@ fn handle_menu_event(handle: &AppHandle, id: &str) {
         }
         "history" => {
             show_window(handle, "main");
-            // Navigate to history view
-            let _ = handle.emit("navigate", "/history");
+            // emit_to("main") so only the main window navigates — the
+            // recording indicator runs the same frontend and must not
+            // be redirected away from /recording.
+            let _ = handle.emit_to("main", "navigate", "/history");
         }
         "settings" => {
             show_window(handle, "main");
-            // Navigate to settings view
-            let _ = handle.emit("navigate", "/settings");
+            let _ = handle.emit_to("main", "navigate", "/settings");
         }
         "quit" => {
             handle.exit(0);
@@ -331,7 +332,7 @@ fn handle_tray_click(handle: &AppHandle) {
                         let _ = update_tray_icon(&handle, RecordingStatus::Ready);
                         let state = state_arc.lock().await;
                         let _ = update_tray_menu(&handle, &state).await;
-                        let _ = handle.emit("recording-complete", &output);
+                        let _ = handle.emit_to("main", "recording-complete", &output);
                     }
                     Err(e) => {
                         log::error!("Failed to stop recording: {}", e);
@@ -360,7 +361,7 @@ fn handle_tray_click(handle: &AppHandle) {
                     Ok(()) => {
                         let _ = crate::indicator::show_indicator(&handle);
                         info!("Recording started");
-                        let _ = handle.emit("recording-started", ());
+                        let _ = handle.emit_to("main", "recording-started", ());
                     }
                     Err(e) => {
                         log::error!("Failed to start recording: {}", e);
