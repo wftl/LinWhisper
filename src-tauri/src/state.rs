@@ -307,8 +307,23 @@ impl AppState {
             let _ = db.insert_history(&history_item);
         }
 
-        // Copy to clipboard and paste
-        let _ = paste::copy_and_paste(&output, self.settings.auto_paste);
+        // Copy to clipboard and paste.
+        //
+        // IMPORTANT: paste::copy_and_paste() contains blocking calls
+        // (thread::sleep, Enigo::new, SendInput) that must NOT run while
+        // the Tokio state mutex is held.  Holding the mutex across those
+        // sleeps starves every other async task that needs the lock and
+        // makes the app appear completely frozen.
+        //
+        // We fire paste off into a spawn_blocking thread (which has its own
+        // OS thread and does not block the async runtime) and do NOT await
+        // it.  The text is already in history by this point, so a paste
+        // failure is non-fatal.
+        let output_for_paste = output.clone();
+        let auto_paste = self.settings.auto_paste;
+        tokio::task::spawn_blocking(move || {
+            let _ = paste::copy_and_paste(&output_for_paste, auto_paste);
+        });
 
         self.status = RecordingStatus::Ready;
 
