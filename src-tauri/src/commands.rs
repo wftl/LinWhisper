@@ -42,14 +42,13 @@ pub async fn stop_recording(
 
     update_tray_icon(&app_handle, RecordingStatus::Processing).map_err(|e| e.to_string())?;
 
-    let result = state.stop_recording().await.map_err(|e| e.to_string())?;
+    let result = state.stop_recording().await;
 
-    update_tray_icon(&app_handle, RecordingStatus::Ready).map_err(|e| e.to_string())?;
-    update_tray_menu(&app_handle, &state)
-        .await
-        .map_err(|e| e.to_string())?;
+    // We need to update tray here to match the reset to Ready state, because GUI button path doesn't emit events (frontend handles its own error).
+    let _ = update_tray_icon(&app_handle, state.status);
+    let _ = update_tray_menu(&app_handle, &state).await;
 
-    Ok(result)
+    result.map_err(|e| e.to_string())
 }
 
 /// Get current recording status
@@ -143,11 +142,13 @@ pub async fn transcribe_file(
         .ok_or_else(|| "No active mode".to_string())?;
 
     let language = state_guard.settings.language.clone();
+    let api_key = state_guard.get_stt_api_key(&mode.stt_provider).map_err(|e| e.to_string())?;
+    let server_url = state_guard.settings.whisper_server_url.clone();
     drop(state_guard);
 
     // Transcribe
     let provider =
-        crate::providers::stt::create_stt_provider(&mode.stt_provider, &mode.stt_model)
+        crate::providers::stt::create_stt_provider(&mode.stt_provider, &mode.stt_model, api_key, server_url)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -251,29 +252,49 @@ pub async fn reprocess_history_item(
         .ok_or_else(|| "Mode not found".to_string())?;
 
     let language = state_guard.settings.language.clone();
+    let ollama_url = state_guard.settings.ollama_url.clone();
+    let basic_subs = state_guard.settings.basic_substitutions;
+    let math_subs = state_guard.settings.math_substitutions;
+    let llm_only_with_subs = state_guard.settings.llm_only_with_substitutions;
+    let skip_llm_on_empty = state_guard.settings.skip_llm_on_empty;
+    let enable_llm_postprocessing = state_guard.settings.enable_llm_postprocessing;
     let api_key = state_guard.get_api_key(&mode.llm_provider).map_err(|e| e.to_string())?;
     drop(state_guard);
 
-    // Reprocess
-    let output = if mode.ai_processing && !mode.prompt_template.is_empty() {
+    // Apply deterministic text substitutions (spoken commands → symbols)
+    log::debug!("Pre-substitution:  {:?}", item.transcript_raw);
+    let output = crate::substitutions::apply_substitutions(
+        &item.transcript_raw, basic_subs, math_subs,
+    );
+    log::debug!("Post-substitution: {:?}", output);
+
+    // Reprocess with LLM (runs after substitutions so it can clean up
+    // orphaned STT punctuation around substituted symbols)
+    let subs_active = basic_subs || math_subs;
+    let skip_llm = !enable_llm_postprocessing
+        || (llm_only_with_subs && !subs_active)
+        || (skip_llm_on_empty && output.trim().is_empty());
+    let output = if mode.ai_processing && !mode.prompt_template.is_empty() && !skip_llm {
         let provider = crate::providers::llm::create_llm_provider(
             &mode.llm_provider,
             &mode.llm_model,
             api_key.as_deref(),
+            ollama_url,
         )
         .map_err(|e| e.to_string())?;
 
         let prompt = crate::modes::render_prompt(
             &mode.prompt_template,
-            &item.transcript_raw,
+            &output,
             None,
             &language,
         );
 
         provider.complete(&prompt).await.map_err(|e| e.to_string())?
     } else {
-        item.transcript_raw.clone()
+        output
     };
+    log::debug!("Post-LLM: {:?}", output);
 
     // Update history item
     item.mode_key = mode_key;
@@ -433,4 +454,30 @@ pub async fn delete_api_key(state: State<'_, SharedState>, provider: String) -> 
 pub async fn has_api_key(state: State<'_, SharedState>, provider: String) -> Result<bool, String> {
     let state = state.lock().await;
     Ok(state.has_api_key(&provider))
+}
+
+/// Test connection to a whisper server
+#[tauri::command]
+pub async fn test_whisper_connection(url: String) -> Result<bool, String> {
+    let client = reqwest::Client::new();
+    client
+        .get(format!("{}/v1/models", url))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .map_err(|e| e.to_string())
+}
+
+/// Test connection to an Ollama server
+#[tauri::command]
+pub async fn test_ollama_connection(url: String) -> Result<bool, String> {
+    let client = reqwest::Client::new();
+    client
+        .get(format!("{}/api/tags", url))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .map_err(|e| e.to_string())
 }

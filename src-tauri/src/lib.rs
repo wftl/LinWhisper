@@ -13,6 +13,7 @@ pub mod modes;
 pub mod paste;
 pub mod providers;
 pub mod state;
+pub mod substitutions;
 pub mod tray;
 
 use log::info;
@@ -25,6 +26,13 @@ use tokio::sync::Mutex;
 pub fn run() {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // Suppress ALSA lib error messages (dmix, dsnoop, oss, etc.) that spam stderr
+    // when cpal probes audio backends. These are harmless on PipeWire systems.
+    // SAFETY: passing None sets a null handler, which silences all libasound diagnostics.
+    unsafe {
+        alsa_sys::snd_lib_error_set_handler(None);
+    }
 
     info!("Starting WhisperTray...");
 
@@ -77,6 +85,19 @@ pub fn run() {
             info!("Application setup complete");
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // For the main window, hide instead of destroy on close so the
+            // tray menu can re-show it later. Without this, closing the
+            // window destroys it and subsequent show_window() calls silently
+            // fail because get_webview_window("main") returns None.
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    info!("Main window hidden (close intercepted)");
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::start_recording,
             commands::stop_recording,
@@ -97,6 +118,8 @@ pub fn run() {
             commands::save_api_key,
             commands::delete_api_key,
             commands::has_api_key,
+            commands::test_whisper_connection,
+            commands::test_ollama_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

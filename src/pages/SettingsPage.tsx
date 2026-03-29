@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../stores/appStore";
 import * as api from "../lib/api";
 
@@ -16,6 +17,10 @@ export default function SettingsPage() {
     anthropic: false,
   });
   const [saving, setSaving] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<"idle" | "success" | "error">("idle");
+  const [testingOllama, setTestingOllama] = useState(false);
+  const [ollamaStatus, setOllamaStatus] = useState<"idle" | "success" | "error">("idle");
 
   useEffect(() => {
     if (settings) {
@@ -57,6 +62,40 @@ export default function SettingsPage() {
     if (confirm(`Delete ${provider} API key?`)) {
       await deleteApiKey(provider);
       setHasKeys((prev) => ({ ...prev, [provider]: false }));
+    }
+  };
+
+  const handleTestConnection = async () => {
+    const url = localSettings?.whisper_server_url;
+    if (!url) return;
+
+    setTestingConnection(true);
+    setConnectionStatus("idle");
+
+    try {
+      const success = await invoke<boolean>("test_whisper_connection", { url });
+      setConnectionStatus(success ? "success" : "error");
+    } catch {
+      setConnectionStatus("error");
+    } finally {
+      setTestingConnection(false);
+    }
+  };
+
+  const handleTestOllama = async () => {
+    const url = localSettings?.ollama_url;
+    if (!url) return;
+
+    setTestingOllama(true);
+    setOllamaStatus("idle");
+
+    try {
+      const success = await invoke<boolean>("test_ollama_connection", { url });
+      setOllamaStatus(success ? "success" : "error");
+    } catch {
+      setOllamaStatus("error");
+    } finally {
+      setTestingOllama(false);
     }
   };
 
@@ -140,33 +179,109 @@ export default function SettingsPage() {
               className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
             >
               <option value="whispercpp">whisper.cpp (Local)</option>
-              <option value="openai">OpenAI Whisper API</option>
+              <option value="whisperserver">Self-hosted Whisper Server</option>
+              <option value="openai">OpenAI Cloud</option>
               <option value="deepgram">Deepgram</option>
             </select>
           </div>
+
+          {/* Whisper Server URL - shown when whisperserver is selected */}
+          {localSettings.default_stt_provider === "whisperserver" && (
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                Whisper Server URL
+                {connectionStatus === "success" && (
+                  <span className="ml-2 text-green-400 text-xs">✓ Connected</span>
+                )}
+                {connectionStatus === "error" && (
+                  <span className="ml-2 text-red-400 text-xs">✗ Connection failed</span>
+                )}
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={localSettings.whisper_server_url || ""}
+                  onChange={(e) => {
+                    setLocalSettings({
+                      ...localSettings,
+                      whisper_server_url: e.target.value || undefined,
+                    });
+                    setConnectionStatus("idle");
+                  }}
+                  placeholder="http://192.168.1.100:8000"
+                  className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+                />
+                <button
+                  onClick={handleTestConnection}
+                  disabled={testingConnection || !localSettings.whisper_server_url}
+                  className="px-3 py-2 bg-gray-600 text-white rounded-lg text-sm hover:bg-gray-500 disabled:opacity-50"
+                >
+                  {testingConnection ? "Testing..." : "Test"}
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                URL of your self-hosted whisper server (Speaches, faster-whisper-server, etc.)
+              </p>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1">
               Default Model
             </label>
-            <select
-              value={localSettings.default_stt_model}
-              onChange={(e) =>
-                setLocalSettings({
-                  ...localSettings,
-                  default_stt_model: e.target.value,
-                })
-              }
-              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
-            >
-              <option value="tiny.en">tiny.en (fastest, English only)</option>
-              <option value="base.en">base.en (recommended, English only)</option>
-              <option value="small.en">small.en (better accuracy)</option>
-              <option value="medium.en">medium.en (high accuracy)</option>
-              <option value="large-v3">large-v3 (best, multilingual)</option>
-            </select>
+            {localSettings.default_stt_provider === "whisperserver" ? (
+              <input
+                type="text"
+                value={localSettings.default_stt_model}
+                onChange={(e) =>
+                  setLocalSettings({
+                    ...localSettings,
+                    default_stt_model: e.target.value,
+                  })
+                }
+                placeholder="e.g., distil-whisper/distil-large-v3.5-ct2"
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+              />
+            ) : localSettings.default_stt_provider === "openai" ? (
+              <select
+                value={localSettings.default_stt_model}
+                onChange={(e) =>
+                  setLocalSettings({
+                    ...localSettings,
+                    default_stt_model: e.target.value,
+                  })
+                }
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+              >
+                <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (fast, cheaper)</option>
+                <option value="gpt-4o-transcribe">gpt-4o-transcribe (higher quality)</option>
+                <option value="whisper-1">whisper-1 (original)</option>
+                <option value="gpt-4o-transcribe-diarize">gpt-4o-transcribe-diarize (speaker labels)</option>
+              </select>
+            ) : (
+              <select
+                value={localSettings.default_stt_model}
+                onChange={(e) =>
+                  setLocalSettings({
+                    ...localSettings,
+                    default_stt_model: e.target.value,
+                  })
+                }
+                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+              >
+                <option value="tiny.en">tiny.en (fastest, English only)</option>
+                <option value="base.en">base.en (recommended, English only)</option>
+                <option value="small.en">small.en (better accuracy)</option>
+                <option value="medium.en">medium.en (high accuracy)</option>
+                <option value="large-v3">large-v3 (best, multilingual)</option>
+              </select>
+            )}
             <p className="text-xs text-gray-500 mt-1">
-              Models are downloaded automatically on first use
+              {localSettings.default_stt_provider === "whisperserver"
+                ? "Model name from your server (e.g., check its /v1/models endpoint)"
+                : localSettings.default_stt_provider === "openai"
+                ? "Diarize adds speaker labels but may need chunking for audio > 30s"
+                : "Models are downloaded automatically on first use"}
             </p>
           </div>
         </div>
@@ -198,6 +313,46 @@ export default function SettingsPage() {
               <option value="anthropic">Anthropic Claude</option>
             </select>
           </div>
+
+          {/* Ollama URL - shown when ollama is selected */}
+          {localSettings.default_llm_provider === "ollama" && (
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                Ollama Server URL
+                {ollamaStatus === "success" && (
+                  <span className="ml-2 text-green-400 text-xs">✓ Connected</span>
+                )}
+                {ollamaStatus === "error" && (
+                  <span className="ml-2 text-red-400 text-xs">✗ Connection failed</span>
+                )}
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={localSettings.ollama_url || ""}
+                  onChange={(e) => {
+                    setLocalSettings({
+                      ...localSettings,
+                      ollama_url: e.target.value || undefined,
+                    });
+                    setOllamaStatus("idle");
+                  }}
+                  placeholder="http://localhost:11434"
+                  className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white"
+                />
+                <button
+                  onClick={handleTestOllama}
+                  disabled={testingOllama || !localSettings.ollama_url}
+                  className="px-3 py-2 bg-gray-600 text-white rounded-lg text-sm hover:bg-gray-500 disabled:opacity-50"
+                >
+                  {testingOllama ? "Testing..." : "Test"}
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Leave empty for localhost:11434, or set to LAN IP (e.g., http://192.168.1.100:11434)
+              </p>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1">
@@ -315,7 +470,28 @@ export default function SettingsPage() {
           <label className="flex items-center gap-3">
             <input
               type="checkbox"
+              checked={localSettings.enable_llm_postprocessing}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  enable_llm_postprocessing: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">Enable LLM post-processing</span>
+              <p className="text-xs text-gray-500">
+                Allow AI post-processing of transcripts (when enabled in the active mode)
+              </p>
+            </div>
+          </label>
+
+          <label className={`flex items-center gap-3 ${!localSettings.enable_llm_postprocessing ? "opacity-50" : ""}`}>
+            <input
+              type="checkbox"
               checked={localSettings.context_awareness}
+              disabled={!localSettings.enable_llm_postprocessing}
               onChange={(e) =>
                 setLocalSettings({
                   ...localSettings,
@@ -328,6 +504,91 @@ export default function SettingsPage() {
               <span className="text-white">Context awareness</span>
               <p className="text-xs text-gray-500">
                 Include clipboard content as context for AI processing
+              </p>
+            </div>
+          </label>
+
+          <label className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              checked={localSettings.basic_substitutions}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  basic_substitutions: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">Basic substitutions</span>
+              <p className="text-xs text-gray-500">
+                Convert spoken punctuation commands (comma, period, etc.) to symbols
+              </p>
+            </div>
+          </label>
+
+          {import.meta.env.VITE_EXPERIMENTAL && (
+          <label className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              checked={localSettings.math_substitutions}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  math_substitutions: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">Math substitutions</span>
+              <p className="text-xs text-gray-500">
+                Convert spoken math/symbol names (alpha → α, for all → ∀). Say "math mode" to skip prefix
+              </p>
+            </div>
+          </label>
+          )}
+
+
+          <label className={`flex items-center gap-3 ${!localSettings.enable_llm_postprocessing ? "opacity-50" : ""}`}>
+            <input
+              type="checkbox"
+              checked={localSettings.llm_only_with_substitutions}
+              disabled={!localSettings.enable_llm_postprocessing}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  llm_only_with_substitutions: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">LLM post-processing only when command substitution enabled</span>
+              <p className="text-xs text-gray-500">
+                Skip LLM post-processing (even if enabled in mode) unless basic or math substitutions are active
+              </p>
+            </div>
+          </label>
+
+          <label className={`flex items-center gap-3 ${!localSettings.enable_llm_postprocessing ? "opacity-50" : ""}`}>
+            <input
+              type="checkbox"
+              checked={localSettings.skip_llm_on_empty}
+              disabled={!localSettings.enable_llm_postprocessing}
+              onChange={(e) =>
+                setLocalSettings({
+                  ...localSettings,
+                  skip_llm_on_empty: e.target.checked,
+                })
+              }
+              className="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+            />
+            <div>
+              <span className="text-white">Don't send empty strings to LLM</span>
+              <p className="text-xs text-gray-500">
+                Skip LLM post-processing when the transcript is empty or whitespace-only
               </p>
             </div>
           </label>

@@ -22,10 +22,11 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    pub fn new(model: String) -> Self {
+    pub fn new(model: String, base_url: Option<String>) -> Self {
         Self {
-            base_url: std::env::var("OLLAMA_HOST")
-                .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+            base_url: base_url
+                .or_else(|| std::env::var("OLLAMA_HOST").ok())
+                .unwrap_or_else(|| "http://localhost:11434".to_string()),
             model,
         }
     }
@@ -268,9 +269,10 @@ pub fn create_llm_provider(
     provider_type: &LlmProviderType,
     model: &str,
     api_key: Option<&str>,
+    server_url: Option<String>,
 ) -> Result<Box<dyn LlmProvider>> {
     match provider_type {
-        LlmProviderType::Ollama => Ok(Box::new(OllamaProvider::new(model.to_string()))),
+        LlmProviderType::Ollama => Ok(Box::new(OllamaProvider::new(model.to_string(), server_url))),
         LlmProviderType::OpenAI => {
             let key = api_key
                 .ok_or_else(|| AppError::Provider("OpenAI API key required".to_string()))?;
@@ -299,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_ollama_provider_creation() {
-        let provider = OllamaProvider::new("llama3.2".to_string());
+        let provider = OllamaProvider::new("llama3.2".to_string(), None);
         assert_eq!(provider.name(), "Ollama");
     }
 }

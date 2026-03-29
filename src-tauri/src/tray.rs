@@ -79,6 +79,10 @@ pub async fn update_tray_menu(handle: &AppHandle, state: &AppState) -> Result<()
     let mut modes_builder = SubmenuBuilder::with_id(handle, "modes", "Mode");
 
     for mode in state.modes.values() {
+        // Skip disabled modes
+        if mode.disabled {
+            continue;
+        }
         let id = format!("mode_{}", mode.key);
         let label = if mode.key == state.active_mode_key {
             format!("✓ {}", mode.name)
@@ -223,12 +227,16 @@ fn handle_menu_event(handle: &AppHandle, id: &str) {
                         match state.stop_recording().await {
                             Ok(output) => {
                                 info!("Recording stopped. Output: {} chars", output.len());
-                                let _ = update_tray_icon(&handle, RecordingStatus::Ready);
+                                let _ = handle.emit("recording-complete", &output);
                             }
                             Err(e) => {
                                 log::error!("Failed to stop recording: {}", e);
+                                let _ = handle.emit("recording-error", e.to_string());
                             }
                         }
+                        // Ensure UI immediately updates to match state (which is reset to Ready on error)
+                        let _ = update_tray_icon(&handle, state.status);
+                        let _ = update_tray_menu(&handle, &state).await;
                     }
                 }
             });
@@ -314,18 +322,22 @@ fn handle_tray_click(handle: &AppHandle) {
 
             if state.is_recording() {
                 // Stop recording
-                match state.stop_recording().await {
+                let result = state.stop_recording().await;
+
+                // Ensure UI immediately updates to match state (which is reset to Ready on error)
+                let _ = update_tray_icon(&handle, state.status);
+                let _ = update_tray_menu(&handle, &state).await;
+
+                match result {
                     Ok(output) => {
                         info!("Recording stopped. Output: {} chars", output.len());
-                        let _ = update_tray_icon(&handle, RecordingStatus::Ready);
-                        let _ = update_tray_menu(&handle, &state).await;
-
                         // Emit event to frontend
                         let _ = handle.emit("recording-complete", &output);
                     }
                     Err(e) => {
                         log::error!("Failed to stop recording: {}", e);
-                        let _ = update_tray_icon(&handle, RecordingStatus::Error);
+                        // Emit error event to frontend so it can sync state
+                        let _ = handle.emit("recording-error", e.to_string());
                     }
                 }
             } else {
@@ -352,7 +364,13 @@ fn handle_tray_click(handle: &AppHandle) {
 /// Show a window
 fn show_window(handle: &AppHandle, label: &str) {
     if let Some(window) = handle.get_webview_window(label) {
+        info!("show_window: found '{}', calling show + set_focus", label);
         let _ = window.show();
         let _ = window.set_focus();
+    } else {
+        log::error!(
+            "show_window: window '{}' not found! Was it destroyed instead of hidden?",
+            label
+        );
     }
 }

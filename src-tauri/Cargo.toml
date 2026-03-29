@@ -1,6 +1,6 @@
 [package]
 name = "whispertray"
-version = "0.1.0"
+version = "0.2.0"
 description = "A tray-based dictation tool for Linux"
 authors = ["WhisperTray Contributors"]
 license = "MIT"
@@ -40,6 +40,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Audio
 cpal = "0.15"
 hound = "3.5"
+alsa-sys = "0.3"
 
 # whisper.cpp bindings
 whisper-rs = "0.11"
@@ -53,6 +54,9 @@ async-trait = "0.1"
 
 # Regex for template processing
 regex = "1"
+
+# Deterministic text substitution (spoken commands → symbols)
+aho-corasick = "1"
 
 # Logging
 log = "0.4"
@@ -68,7 +72,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 
 # HTTP client for cloud providers (using rustls to avoid OpenSSL dependency)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 
 # Secret storage
 keyring = "2"
@@ -91,3 +95,6 @@ strip = true
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[dev-dependencies]
+tempfile = "3.25.0"

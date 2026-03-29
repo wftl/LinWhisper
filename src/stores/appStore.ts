@@ -102,6 +102,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         get().loadHistory();
       });
 
+      listen<string>("recording-error", (event) => {
+        set({
+          status: "ready",
+          isRecording: false,
+          error: event.payload,
+        });
+      });
+
       listen("recording-started", () => {
         set({ status: "recording", isRecording: true });
       });
@@ -140,10 +148,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Refresh history
       get().loadHistory();
     } catch (error) {
+      // Re-fetch backend state to ensure sync
+      const statusResponse = await api.getRecordingStatus().catch(() => null);
       set({
         error: error instanceof Error ? error.message : "Failed to stop recording",
-        status: "error",
-        isRecording: false,
+        status: statusResponse?.status ?? "ready",
+        isRecording: statusResponse?.is_recording ?? false,
       });
     }
   },

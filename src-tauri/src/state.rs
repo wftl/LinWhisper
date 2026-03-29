@@ -3,7 +3,7 @@
 use crate::audio::RecordingHandle;
 use crate::database::{get_audio_dir, get_database_path, Database, HistoryItem};
 use crate::error::{AppError, Result};
-use crate::modes::{load_modes, Mode, LlmProvider as LlmProviderType};
+use crate::modes::{load_modes, Mode, LlmProvider as LlmProviderType, SttProvider as SttProviderType};
 use crate::paste;
 use crate::providers::{llm, stt};
 use chrono::Utc;
@@ -54,6 +54,31 @@ pub struct Settings {
     pub auto_paste: bool,
     pub context_awareness: bool,
     pub language: String,
+    /// URL for self-hosted whisper server (used when stt_provider is WhisperServer)
+    #[serde(default)]
+    pub whisper_server_url: Option<String>,
+    /// URL for Ollama server (used when llm_provider is Ollama)
+    #[serde(default)]
+    pub ollama_url: Option<String>,
+    /// Replace spoken punctuation commands (comma, period, etc.) with symbols
+    #[serde(default)]
+    pub basic_substitutions: bool,
+    /// Replace spoken math/symbol names (alpha → α, for all → ∀, etc.)
+    #[serde(default)]
+    pub math_substitutions: bool,
+    /// Skip LLM post-processing unless at least one command substitution setting is enabled
+    #[serde(default)]
+    pub llm_only_with_substitutions: bool,
+    /// Skip LLM post-processing when the transcript is empty (whitespace-only)
+    #[serde(default)]
+    pub skip_llm_on_empty: bool,
+    /// Global override: disable LLM post-processing regardless of mode settings
+    #[serde(default = "default_true")]
+    pub enable_llm_postprocessing: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -68,6 +93,13 @@ impl Default for Settings {
             auto_paste: true,
             context_awareness: false,
             language: "en".to_string(),
+            whisper_server_url: None,
+            ollama_url: None,
+            basic_substitutions: false,
+            math_substitutions: false,
+            llm_only_with_substitutions: false,
+            skip_llm_on_empty: false,
+            enable_llm_postprocessing: true,
         }
     }
 }
@@ -235,6 +267,16 @@ impl AppState {
         let samples = crate::audio::stop_recording(&self.recording_handle)?;
         self.status = RecordingStatus::Processing;
 
+        // Helper to reset status on error
+        let result = self.process_recording(samples).await;
+        if result.is_err() {
+            self.status = RecordingStatus::Ready;
+        }
+        result
+    }
+
+    /// Internal: process recorded samples (transcribe, AI, save history)
+    async fn process_recording(&mut self, samples: Vec<f32>) -> Result<String> {
         // Get active mode
         let mode = self
             .get_active_mode()
@@ -256,18 +298,32 @@ impl AppState {
         let transcript = self.transcribe(&samples, &mode).await?;
         log::info!("Transcription complete: {} chars", transcript.len());
 
-        // AI processing if enabled
-        let output = if mode.ai_processing && !mode.prompt_template.is_empty() {
+        // Apply deterministic text substitutions (spoken commands → symbols)
+        log::debug!("Pre-substitution:  {:?}", transcript);
+        let output = crate::substitutions::apply_substitutions(
+            &transcript,
+            self.settings.basic_substitutions,
+            self.settings.math_substitutions,
+        );
+        log::debug!("Post-substitution: {:?}", output);
+
+        // AI processing if enabled (runs after substitutions so it can
+        // clean up orphaned STT punctuation around substituted symbols)
+        let subs_active = self.settings.basic_substitutions || self.settings.math_substitutions;
+        let skip_llm = !self.settings.enable_llm_postprocessing
+            || (self.settings.llm_only_with_substitutions && !subs_active)
+            || (self.settings.skip_llm_on_empty && output.trim().is_empty());
+        let output = if mode.ai_processing && !mode.prompt_template.is_empty() && !skip_llm {
             log::info!("Starting AI processing...");
-            match self.process_with_llm(&transcript, &mode).await {
+            match self.process_with_llm(&output, &mode).await {
                 Ok(result) => result,
                 Err(e) => {
-                    log::warn!("AI processing failed: {}, using raw transcript", e);
-                    transcript.clone()
+                    log::warn!("AI processing failed: {}, using substituted text", e);
+                    output
                 }
             }
         } else {
-            transcript.clone()
+            output
         };
 
         // Save to history
@@ -309,7 +365,16 @@ impl AppState {
 
     /// Transcribe audio samples
     async fn transcribe(&self, samples: &[f32], mode: &Mode) -> Result<String> {
-        let provider = stt::create_stt_provider(&mode.stt_provider, &mode.stt_model).await?;
+        let api_key = self.get_stt_api_key(&mode.stt_provider)?;
+        let server_url = self.settings.whisper_server_url.clone();
+
+        let provider = stt::create_stt_provider(
+            &mode.stt_provider,
+            &mode.stt_model,
+            api_key,
+            server_url,
+        ).await?;
+
         provider
             .transcribe(samples, Some(&self.settings.language))
             .await
@@ -324,6 +389,7 @@ impl AppState {
             &mode.llm_provider,
             &mode.llm_model,
             api_key.as_deref(),
+            self.settings.ollama_url.clone(),
         )?;
 
         let prompt = crate::modes::render_prompt(
@@ -336,7 +402,7 @@ impl AppState {
         provider.complete(&prompt).await
     }
 
-    /// Get API key for a provider from secure storage
+    /// Get API key for an LLM provider from secure storage
     pub fn get_api_key(&self, provider: &LlmProviderType) -> Result<Option<String>> {
         let service = "whispertray";
         let key_name = match provider {
@@ -351,6 +417,30 @@ impl AppState {
                 Ok(password) => Ok(Some(password)),
                 Err(keyring::Error::NoEntry) => Ok(None),
                 Err(e) => Err(AppError::Keyring(format!("Failed to get API key: {}", e))),
+            },
+            Err(e) => Err(AppError::Keyring(format!(
+                "Failed to access keyring: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Get API key for an STT provider from secure storage
+    pub fn get_stt_api_key(&self, provider: &SttProviderType) -> Result<Option<String>> {
+        let service = "whispertray";
+        let key_name = match provider {
+            SttProviderType::OpenAI => "openai_api_key", // Reuse same key as LLM
+            SttProviderType::Deepgram => "deepgram_api_key",
+            SttProviderType::WhisperCpp => return Ok(None),    // Local, no key needed
+            SttProviderType::WhisperServer => return Ok(None), // Self-hosted, typically no auth
+            SttProviderType::Custom(_) => return Ok(None),
+        };
+
+        match keyring::Entry::new(service, key_name) {
+            Ok(entry) => match entry.get_password() {
+                Ok(password) => Ok(Some(password)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(AppError::Keyring(format!("Failed to get STT API key: {}", e))),
             },
             Err(e) => Err(AppError::Keyring(format!(
                 "Failed to access keyring: {}",
