@@ -3,7 +3,8 @@
 use crate::audio::RecordingHandle;
 use crate::database::{get_audio_dir, get_database_path, Database, HistoryItem};
 use crate::error::{AppError, Result};
-use crate::modes::{load_modes, Mode, LlmProvider as LlmProviderType};
+use crate::indicator::{emit_processing, hide_indicator};
+use crate::modes::{create_builtin_modes, load_modes, LlmProvider as LlmProviderType, Mode};
 use crate::paste;
 use crate::providers::{llm, stt};
 use chrono::Utc;
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tauri::AppHandle;
 use uuid::Uuid;
 
@@ -44,6 +46,7 @@ impl RecordingStatus {
 
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub default_stt_provider: String,
     pub default_stt_model: String,
@@ -54,6 +57,7 @@ pub struct Settings {
     pub auto_paste: bool,
     pub context_awareness: bool,
     pub language: String,
+    pub first_run_completed: bool,
 }
 
 impl Default for Settings {
@@ -68,15 +72,13 @@ impl Default for Settings {
             auto_paste: true,
             context_awareness: false,
             language: "en".to_string(),
+            first_run_completed: false,
         }
     }
 }
 
 /// Main application state (Send + Sync safe)
 pub struct AppState {
-    /// Tauri app handle
-    pub app_handle: AppHandle,
-
     /// Current recording status
     pub status: RecordingStatus,
 
@@ -97,22 +99,35 @@ pub struct AppState {
 
     /// Last context (clipboard text)
     pub last_context: Option<String>,
+
+    /// Cached STT providers keyed by provider/model.
+    pub(crate) stt_provider_cache: stt::ProviderCache,
 }
 
 impl AppState {
     /// Create new application state
-    pub fn new(app_handle: AppHandle) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let settings = Self::load_settings()?;
+        let builtin_modes = create_builtin_modes();
+        let mut modes = HashMap::new();
+        for mode in builtin_modes {
+            modes.insert(mode.key.clone(), mode);
+        }
+        let active_mode_key = if modes.contains_key(&settings.active_mode_key) {
+            settings.active_mode_key.clone()
+        } else {
+            "voice_to_text".to_string()
+        };
 
         Ok(Self {
-            app_handle,
-            status: RecordingStatus::Loading,
-            modes: HashMap::new(),
-            active_mode_key: settings.active_mode_key.clone(),
+            status: RecordingStatus::Ready,
+            modes,
+            active_mode_key,
             recording_handle: RecordingHandle::new(),
             database: None,
             settings,
             last_context: None,
+            stt_provider_cache: stt::ProviderCache::default(),
         })
     }
 
@@ -163,7 +178,6 @@ impl AppState {
             self.active_mode_key = "voice_to_text".to_string();
         }
 
-        self.status = RecordingStatus::Ready;
         Ok(())
     }
 
@@ -207,137 +221,34 @@ impl AppState {
         &mut self,
         level_callback: Option<crate::audio::LevelCallback>,
     ) -> Result<()> {
-        if self.is_recording() {
+        if self.is_recording() || self.status == RecordingStatus::Processing {
             return Err(AppError::RecordingInProgress);
         }
 
-        // Capture context if enabled
-        if self.settings.context_awareness {
-            self.last_context = paste::get_clipboard_text().ok();
-        }
-
-        crate::audio::start_recording(
-            self.recording_handle.clone(),
-            &self.settings.input_device,
-            level_callback,
-        )?;
+        self.recording_handle =
+            crate::audio::start_recording(&self.settings.input_device, level_callback)?;
         self.status = RecordingStatus::Recording;
+
+        self.last_context = self
+            .settings
+            .context_awareness
+            .then(paste::get_clipboard_text)
+            .and_then(std::result::Result::ok);
+
+        if let Some(mode) = self.get_active_mode().cloned() {
+            let cache = self.stt_provider_cache.clone();
+            tauri::async_runtime::spawn(async move {
+                cache
+                    .warm_installed(&mode.stt_provider, &mode.stt_model)
+                    .await;
+            });
+        }
 
         Ok(())
     }
 
-    /// Stop recording and process
-    pub async fn stop_recording(&mut self) -> Result<String> {
-        if !self.is_recording() {
-            return Err(AppError::NoRecordingInProgress);
-        }
-
-        let samples = crate::audio::stop_recording(&self.recording_handle)?;
-        self.status = RecordingStatus::Processing;
-
-        // Get active mode
-        let mode = self
-            .get_active_mode()
-            .cloned()
-            .ok_or_else(|| AppError::ModeNotFound(self.active_mode_key.clone()))?;
-
-        // Save audio file
-        let audio_dir = get_audio_dir()?;
-        tokio::fs::create_dir_all(&audio_dir).await?;
-
-        let audio_id = Uuid::new_v4().to_string();
-        let audio_path = audio_dir.join(format!("{}.wav", audio_id));
-        crate::audio::save_wav(&samples, &audio_path)?;
-
-        let duration_ms = crate::audio::calculate_duration_ms(samples.len());
-
-        // Transcribe
-        log::info!("Starting transcription...");
-        let transcript = self.transcribe(&samples, &mode).await?;
-        log::info!("Transcription complete: {} chars", transcript.len());
-
-        // AI processing if enabled
-        let output = if mode.ai_processing && !mode.prompt_template.is_empty() {
-            log::info!("Starting AI processing...");
-            match self.process_with_llm(&transcript, &mode).await {
-                Ok(result) => result,
-                Err(e) => {
-                    log::warn!("AI processing failed: {}, using raw transcript", e);
-                    transcript.clone()
-                }
-            }
-        } else {
-            transcript.clone()
-        };
-
-        // Save to history
-        let history_item = HistoryItem {
-            id: audio_id,
-            created_at: Utc::now(),
-            mode_key: mode.key.clone(),
-            audio_path: Some(audio_path.to_string_lossy().to_string()),
-            transcript_raw: transcript.clone(),
-            output_final: output.clone(),
-            stt_provider: format!("{:?}", mode.stt_provider).to_lowercase(),
-            stt_model: mode.stt_model.clone(),
-            llm_provider: if mode.ai_processing {
-                Some(format!("{:?}", mode.llm_provider).to_lowercase())
-            } else {
-                None
-            },
-            llm_model: if mode.ai_processing {
-                Some(mode.llm_model.clone())
-            } else {
-                None
-            },
-            duration_ms,
-            error: None,
-        };
-
-        if let Some(db) = &self.database {
-            let db = db.lock().unwrap();
-            let _ = db.insert_history(&history_item);
-        }
-
-        // Copy to clipboard and paste
-        let _ = paste::copy_and_paste(&output, self.settings.auto_paste);
-
-        self.status = RecordingStatus::Ready;
-
-        Ok(output)
-    }
-
-    /// Transcribe audio samples
-    async fn transcribe(&self, samples: &[f32], mode: &Mode) -> Result<String> {
-        let provider = stt::create_stt_provider(&mode.stt_provider, &mode.stt_model).await?;
-        provider
-            .transcribe(samples, Some(&self.settings.language))
-            .await
-    }
-
-    /// Process transcript with LLM
-    async fn process_with_llm(&self, transcript: &str, mode: &Mode) -> Result<String> {
-        // Get API key if needed
-        let api_key = self.get_api_key(&mode.llm_provider)?;
-
-        let provider = llm::create_llm_provider(
-            &mode.llm_provider,
-            &mode.llm_model,
-            api_key.as_deref(),
-        )?;
-
-        let prompt = crate::modes::render_prompt(
-            &mode.prompt_template,
-            transcript,
-            self.last_context.as_deref(),
-            &self.settings.language,
-        );
-
-        provider.complete(&prompt).await
-    }
-
     /// Get API key for a provider from secure storage
-    pub fn get_api_key(&self, provider: &LlmProviderType) -> Result<Option<String>> {
+    pub fn get_api_key(provider: &LlmProviderType) -> Result<Option<String>> {
         let service = "whispertray";
         let key_name = match provider {
             LlmProviderType::OpenAI => "openai_api_key",
@@ -385,7 +296,10 @@ impl AppState {
         match entry.delete_password() {
             Ok(_) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()), // Already deleted
-            Err(e) => Err(AppError::Keyring(format!("Failed to delete API key: {}", e))),
+            Err(e) => Err(AppError::Keyring(format!(
+                "Failed to delete API key: {}",
+                e
+            ))),
         }
     }
 
@@ -401,10 +315,168 @@ impl AppState {
 
     /// Cancel current recording
     pub fn cancel_recording(&mut self) {
-        self.recording_handle.set_recording(false);
-        self.status = RecordingStatus::Ready;
+        if crate::audio::stop_recording(&self.recording_handle).is_ok() {
+            self.status = RecordingStatus::Ready;
+        }
     }
 }
 
 /// Shared state type for Tauri
-pub type SharedState = Arc<tokio::sync::Mutex<AppState>>;
+pub struct SharedState(pub tokio::sync::Mutex<AppState>);
+
+/// Stop capture and hand off the recording without holding the app lock during inference.
+pub async fn complete_recording(shared: &SharedState, handle: &AppHandle) -> Result<String> {
+    let stopped_at = Instant::now();
+    let (samples, mode, language, last_context, auto_paste, database, cache) = {
+        let mut state = shared.0.lock().await;
+        if !state.is_recording() {
+            return Err(AppError::NoRecordingInProgress);
+        }
+
+        let mode = state
+            .get_active_mode()
+            .cloned()
+            .ok_or_else(|| AppError::ModeNotFound(state.active_mode_key.clone()))?;
+        let samples = crate::audio::stop_recording(&state.recording_handle)?;
+        state.status = RecordingStatus::Processing;
+        emit_processing(handle, true);
+        let _ = crate::tray::update_tray_icon(handle, RecordingStatus::Processing);
+
+        (
+            Arc::new(samples),
+            mode,
+            state.settings.language.clone(),
+            state.last_context.take(),
+            state.settings.auto_paste,
+            state.database.clone(),
+            state.stt_provider_cache.clone(),
+        )
+    };
+    let capture_ms = stopped_at.elapsed().as_millis();
+
+    let result = async {
+        let started = Instant::now();
+        let provider = cache.get(&mode.stt_provider, &mode.stt_model).await?;
+        let model_ms = started.elapsed().as_millis();
+
+        let started = Instant::now();
+        let transcript = provider.transcribe(samples.clone(), Some(&language)).await?;
+        let speech_ms = started.elapsed().as_millis();
+
+        let started = Instant::now();
+        let output = if mode.ai_processing && !mode.prompt_template.is_empty() {
+            let api_key = AppState::get_api_key(&mode.llm_provider)?;
+            let provider =
+                llm::create_llm_provider(&mode.llm_provider, &mode.llm_model, api_key.as_deref())?;
+            let prompt = crate::modes::render_prompt(
+                &mode.prompt_template,
+                &transcript,
+                last_context.as_deref(),
+                &language,
+            );
+
+            match provider.complete(&prompt).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log::warn!("AI processing failed: {}, using raw transcript", e);
+                    transcript.clone()
+                }
+            }
+        } else {
+            transcript.clone()
+        };
+        let ai_ms = started.elapsed().as_millis();
+
+        let history_item = HistoryItem {
+            id: Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            mode_key: mode.key,
+            audio_path: None,
+            transcript_raw: transcript,
+            output_final: output.clone(),
+            stt_provider: format!("{:?}", mode.stt_provider).to_lowercase(),
+            stt_model: mode.stt_model,
+            llm_provider: mode
+                .ai_processing
+                .then(|| format!("{:?}", mode.llm_provider).to_lowercase()),
+            llm_model: mode.ai_processing.then_some(mode.llm_model),
+            duration_ms: crate::audio::calculate_duration_ms(samples.len()),
+            error: None,
+        };
+
+        tokio::task::spawn_blocking(move || {
+            if !output.is_empty() {
+                let started = Instant::now();
+                if let Err(error) = paste::copy_and_paste(&output, auto_paste) {
+                    log::warn!("Could not deliver dictation: {error}");
+                }
+                log::info!(
+                    "Dictation ({} ms audio): stop={} ms, model={} ms, speech={} ms, AI={} ms, clipboard/paste={} ms, total={} ms",
+                    history_item.duration_ms,
+                    capture_ms,
+                    model_ms,
+                    speech_ms,
+                    ai_ms,
+                    started.elapsed().as_millis(),
+                    stopped_at.elapsed().as_millis(),
+                );
+            }
+
+            if let Some(db) = database {
+                if let Err(error) = save_recording_history(&db, &samples, history_item) {
+                    log::warn!("Could not save dictation history: {error}");
+                }
+            }
+            output
+        })
+        .await
+        .map_err(|error| AppError::Audio(format!("Dictation delivery task failed: {error}")))
+    }
+    .await;
+
+    let mut state = shared.0.lock().await;
+    state.status = if result.is_ok() {
+        RecordingStatus::Ready
+    } else {
+        RecordingStatus::Error
+    };
+    let _ = hide_indicator(handle);
+    emit_processing(handle, false);
+    let _ = crate::tray::update_tray_icon(handle, state.status);
+    let _ = crate::tray::update_tray_menu(handle, &state).await;
+
+    result
+}
+
+fn save_recording_history(
+    db: &Mutex<Database>,
+    samples: &[f32],
+    mut item: HistoryItem,
+) -> Result<()> {
+    let audio_result = (|| {
+        let dir = get_audio_dir()?;
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.wav", item.id));
+        if let Err(error) = crate::audio::save_wav(samples, &path) {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+        Ok(path)
+    })();
+
+    match &audio_result {
+        Ok(path) => item.audio_path = Some(path.to_string_lossy().into_owned()),
+        Err(error) => log::warn!("Could not save dictation audio: {error}"),
+    }
+
+    let insert = db
+        .lock()
+        .map_err(|_| AppError::Config("History database is unavailable".to_string()))
+        .and_then(|db| db.insert_history(&item));
+    if insert.is_err() {
+        if let Ok(path) = audio_result {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    insert
+}

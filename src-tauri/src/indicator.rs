@@ -3,9 +3,14 @@
 use crate::error::Result;
 use log::info;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder,
+};
 
 const INDICATOR_LABEL: &str = "recording";
+const INDICATOR_WIDTH: f64 = 288.0;
+const INDICATOR_HEIGHT: f64 = 62.0;
+const INDICATOR_TOP_Y: f64 = 12.0;
 
 #[derive(Clone, Serialize)]
 pub struct AudioLevel {
@@ -15,45 +20,43 @@ pub struct AudioLevel {
 
 /// Show the recording indicator window
 pub fn show_indicator(handle: &AppHandle) -> Result<()> {
-    // Try to get existing window or create new one
-    if let Some(window) = handle.get_webview_window(INDICATOR_LABEL) {
-        // Navigate to the recording route and show
-        let _ = window.eval("window.location.href = '/recording'");
-        let _ = window.show();
-        let _ = window.set_focus();
-        info!("Recording indicator shown");
+    let window = if let Some(window) = handle.get_webview_window(INDICATOR_LABEL) {
+        window
     } else {
-        // Create the window if it doesn't exist
-        let window = WebviewWindowBuilder::new(
+        WebviewWindowBuilder::new(
             handle,
             INDICATOR_LABEL,
             WebviewUrl::App("/recording".into()),
         )
         .title("")
-        .inner_size(200.0, 60.0)
+        .inner_size(INDICATOR_WIDTH, INDICATOR_HEIGHT)
         .decorations(false)
         .transparent(true)
+        .shadow(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
-        .visible(true)
-        .build()?;
+        .focused(false)
+        .focusable(false)
+        .visible(false)
+        .build()?
+    };
 
-        // Position near top-center of screen
-        if let Ok(monitor) = window.current_monitor() {
-            if let Some(monitor) = monitor {
-                let size = monitor.size();
-                let x = (size.width as i32 - 200) / 2;
-                let y = 50;
-                let _ = window.set_position(tauri::Position::Physical(
-                    tauri::PhysicalPosition::new(x, y),
-                ));
-            }
-        }
-
-        info!("Recording indicator window created");
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| handle.primary_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
+        let size = LogicalSize::new(INDICATOR_WIDTH, INDICATOR_HEIGHT)
+            .to_physical::<u32>(monitor.scale_factor());
+        let x = monitor.position().x + (monitor.size().width as i32 - size.width as i32) / 2;
+        let y = monitor.position().y + (INDICATOR_TOP_Y * monitor.scale_factor()).round() as i32;
+        let _ = window.set_position(PhysicalPosition::new(x, y));
     }
 
+    window.show()?;
+    info!("Recording indicator shown");
     Ok(())
 }
 
@@ -68,11 +71,7 @@ pub fn hide_indicator(handle: &AppHandle) -> Result<()> {
 
 /// Emit an audio level update to the indicator
 pub fn emit_audio_level(handle: &AppHandle, level: f32, peak: f32) {
-    let _ = handle.emit_to(
-        INDICATOR_LABEL,
-        "audio-level",
-        AudioLevel { level, peak },
-    );
+    let _ = handle.emit_to(INDICATOR_LABEL, "audio-level", AudioLevel { level, peak });
 }
 
 /// Emit processing state to the indicator

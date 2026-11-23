@@ -1,7 +1,8 @@
 //! Global hotkey handling for recording toggle
 
 use crate::error::{AppError, Result};
-use crate::state::{RecordingStatus, SharedState};
+use crate::indicator::{emit_audio_level, emit_processing, show_indicator};
+use crate::state::{complete_recording, RecordingStatus, SharedState};
 use crate::tray::{update_tray_icon, update_tray_icon_for_level, update_tray_menu};
 use log::info;
 use tauri::{AppHandle, Manager};
@@ -15,7 +16,8 @@ pub fn setup_hotkey(app: &tauri::App) -> Result<()> {
     let handle = app.handle().clone();
 
     // Parse the shortcut
-    let shortcut: Shortcut = DEFAULT_HOTKEY.parse()
+    let shortcut: Shortcut = DEFAULT_HOTKEY
+        .parse()
         .map_err(|e| crate::error::AppError::Config(format!("Invalid hotkey: {}", e)))?;
 
     info!("Registering global hotkey: {}", DEFAULT_HOTKEY);
@@ -46,45 +48,40 @@ fn toggle_recording(handle: &AppHandle) {
     let handle = handle.clone();
     tauri::async_runtime::spawn(async move {
         if let Some(state_arc) = handle.try_state::<SharedState>() {
-            // Check recording state with minimal lock time
-            let is_recording = {
-                let state = state_arc.lock().await;
-                state.is_recording()
+            let (is_recording, is_processing) = {
+                let state = state_arc.0.lock().await;
+                (
+                    state.is_recording(),
+                    state.status == RecordingStatus::Processing,
+                )
             };
+            if is_processing {
+                return;
+            }
 
             if is_recording {
-                // Stop recording - get data quickly, then release lock for processing
-                let stop_result = {
-                    let mut state = state_arc.lock().await;
-                    // Immediately show processing state
-                    let _ = update_tray_icon(&handle, RecordingStatus::Processing);
-                    state.stop_recording().await
-                };
-
-                match stop_result {
-                    Ok(output) => {
-                        info!("Recording stopped via hotkey. Output: {} chars", output.len());
-                        let _ = update_tray_icon(&handle, RecordingStatus::Ready);
-                        // Update menu after processing
-                        let state = state_arc.lock().await;
-                        let _ = update_tray_menu(&handle, &state).await;
-                    }
-                    Err(e) => {
-                        log::error!("Failed to stop recording: {}", e);
-                        let _ = update_tray_icon(&handle, RecordingStatus::Error);
-                    }
+                match complete_recording(&state_arc, &handle).await {
+                    Ok(output) => info!(
+                        "Recording stopped via hotkey. Output: {} chars",
+                        output.len()
+                    ),
+                    Err(AppError::NoRecordingInProgress) => {}
+                    Err(e) => log::error!("Failed to stop recording: {}", e),
                 }
             } else {
                 // Start recording with level callback for tray icon updates
                 let handle_for_callback = handle.clone();
-                let level_callback: crate::audio::LevelCallback = Box::new(move |level| {
+                let level_callback: crate::audio::LevelCallback = Box::new(move |level, peak| {
                     let _ = update_tray_icon_for_level(&handle_for_callback, level);
+                    emit_audio_level(&handle_for_callback, level, peak);
                 });
 
                 let start_result = {
-                    let mut state = state_arc.lock().await;
+                    let mut state = state_arc.0.lock().await;
                     let result = state.start_recording_with_callback(Some(level_callback));
                     if result.is_ok() {
+                        let _ = show_indicator(&handle);
+                        emit_processing(&handle, false);
                         let _ = update_tray_icon(&handle, RecordingStatus::Recording);
                         let _ = update_tray_menu(&handle, &state).await;
                     }
@@ -95,6 +92,7 @@ fn toggle_recording(handle: &AppHandle) {
                     Ok(()) => {
                         info!("Recording started via hotkey");
                     }
+                    Err(AppError::RecordingInProgress) => {}
                     Err(e) => {
                         log::error!("Failed to start recording: {}", e);
                         let _ = update_tray_icon(&handle, RecordingStatus::Error);

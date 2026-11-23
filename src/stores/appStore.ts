@@ -50,6 +50,9 @@ interface AppState {
   clearError: () => void;
 }
 
+let initializePromise: Promise<void> | null = null;
+let eventListenersRegistered = false;
+
 export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   status: "loading",
@@ -67,12 +70,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Initialize the app
   initialize: async () => {
+    if (initializePromise) {
+      return initializePromise;
+    }
+
+    initializePromise = (async () => {
     try {
       set({ isLoading: true, error: null });
 
-      // Load all data in parallel
-      const [modes, activeMode, devices, settings, statusResponse] =
-        await Promise.all([
+      // Load data in parallel but don't fail initialization if one call errors.
+      const [modesRes, activeModeRes, devicesRes, settingsRes, statusRes] =
+        await Promise.allSettled([
           api.getModes(),
           api.getActiveMode(),
           api.getInputDevices(),
@@ -80,37 +88,71 @@ export const useAppStore = create<AppState>((set, get) => ({
           api.getRecordingStatus(),
         ]);
 
+      const modes = modesRes.status === "fulfilled" ? modesRes.value : [];
+      const activeMode =
+        activeModeRes.status === "fulfilled" ? activeModeRes.value : null;
+      const devices = devicesRes.status === "fulfilled" ? devicesRes.value : [];
+      const settings =
+        settingsRes.status === "fulfilled" ? settingsRes.value : null;
+      const statusResponse =
+        statusRes.status === "fulfilled"
+          ? statusRes.value
+          : { status: "ready" as RecordingStatus, is_recording: false };
+
+      const initErrors = [
+        modesRes,
+        activeModeRes,
+        devicesRes,
+        settingsRes,
+        statusRes,
+      ]
+        .filter((r) => r.status === "rejected")
+        .map((r) =>
+          r.reason instanceof Error ? r.reason.message : String(r.reason)
+        );
+
       set({
         modes,
         activeMode,
         devices,
         settings,
-        selectedDevice: settings.input_device,
+        selectedDevice: settings?.input_device ?? "",
         status: statusResponse.status,
         isRecording: statusResponse.is_recording,
         isLoading: false,
+        error: initErrors.length
+          ? `Partial initialization issues: ${initErrors.join(" | ")}`
+          : null,
       });
 
-      // Set up event listeners
-      listen<string>("recording-complete", (event) => {
-        set({
-          status: "ready",
-          isRecording: false,
-          lastOutput: event.payload,
+      if (!eventListenersRegistered) {
+        eventListenersRegistered = true;
+
+        // Set up event listeners
+        void listen<string>("recording-complete", (event) => {
+          set({
+            status: "ready",
+            isRecording: false,
+            lastOutput: event.payload,
+          });
+          // Refresh history
+          void get().loadHistory();
         });
-        // Refresh history
-        get().loadHistory();
-      });
 
-      listen("recording-started", () => {
-        set({ status: "recording", isRecording: true });
-      });
+        void listen("recording-started", () => {
+          set({ status: "recording", isRecording: true });
+        });
+      }
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : "Failed to initialize",
+        status: "ready",
         isLoading: false,
       });
     }
+    })();
+
+    return initializePromise;
   },
 
   // Start recording

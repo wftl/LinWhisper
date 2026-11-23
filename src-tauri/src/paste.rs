@@ -1,20 +1,28 @@
 //! Clipboard and paste simulation module
 //!
 //! Supports multiple backends:
-//! - X11: enigo (libxdo)
+//! - Windows: SendInput for paste, enigo for direct typing
+//! - macOS/X11: enigo
 //! - Wayland: wtype or ydotool
 //! - Fallback: clipboard only
 
 use crate::error::{AppError, Result};
 use arboard::Clipboard;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
+
+static CACHED_BACKEND: OnceLock<PasteBackend> = OnceLock::new();
 
 /// Paste backend detection result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PasteBackend {
-    /// X11 with enigo/libxdo
+    /// Native Ctrl+V input on Windows
+    #[cfg(target_os = "windows")]
+    Windows,
+    /// Cross-platform simulation with enigo
+    #[cfg(not(target_os = "windows"))]
     Enigo,
     /// Wayland with wtype
     Wtype,
@@ -24,30 +32,50 @@ pub enum PasteBackend {
     ClipboardOnly,
 }
 
-/// Detect the best available paste backend
+/// Detect the best available paste backend (result is cached after first call)
 pub fn detect_backend() -> PasteBackend {
-    if is_wayland() {
-        // On Wayland, try wtype first, then ydotool
-        if is_command_available("wtype") {
-            log::info!("Paste backend: wtype (Wayland)");
-            PasteBackend::Wtype
-        } else if is_command_available("ydotool") {
-            log::info!("Paste backend: ydotool (Wayland)");
-            PasteBackend::Ydotool
-        } else {
-            log::warn!("No Wayland paste backend available. Install wtype or ydotool for auto-paste.");
-            PasteBackend::ClipboardOnly
+    *CACHED_BACKEND.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        {
+            log::info!("Paste backend: SendInput (Windows)");
+            PasteBackend::Windows
         }
-    } else {
-        // On X11, use enigo (libxdo)
-        log::info!("Paste backend: enigo (X11)");
-        PasteBackend::Enigo
-    }
+        #[cfg(target_os = "macos")]
+        {
+            log::info!("Paste backend: enigo (macOS)");
+            PasteBackend::Enigo
+        }
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            if is_wayland() {
+                // On Wayland, try wtype first, then ydotool
+                if is_command_available("wtype") {
+                    log::info!("Paste backend: wtype (Wayland)");
+                    PasteBackend::Wtype
+                } else if is_command_available("ydotool") {
+                    log::info!("Paste backend: ydotool (Wayland)");
+                    PasteBackend::Ydotool
+                } else {
+                    log::warn!("No Wayland paste backend available. Install wtype or ydotool for auto-paste.");
+                    PasteBackend::ClipboardOnly
+                }
+            } else {
+                // On X11 and other desktop sessions, use enigo
+                log::info!("Paste backend: enigo");
+                PasteBackend::Enigo
+            }
+        }
+    })
 }
 
 /// Check if a command is available in PATH
 fn is_command_available(cmd: &str) -> bool {
-    Command::new("which")
+    #[cfg(target_os = "windows")]
+    let checker = "where";
+    #[cfg(not(target_os = "windows"))]
+    let checker = "which";
+
+    Command::new(checker)
         .arg(cmd)
         .output()
         .map(|o| o.status.success())
@@ -87,10 +115,13 @@ pub fn copy_and_paste(text: &str, should_paste: bool) -> Result<()> {
 pub fn paste() -> Result<()> {
     let backend = detect_backend();
 
-    // Delay to ensure clipboard is ready and user has released hotkey
+    #[cfg(not(target_os = "windows"))]
     thread::sleep(Duration::from_millis(200));
 
     match backend {
+        #[cfg(target_os = "windows")]
+        PasteBackend::Windows => paste_windows(),
+        #[cfg(not(target_os = "windows"))]
         PasteBackend::Enigo => paste_enigo(),
         PasteBackend::Wtype => {
             // Try wtype, fall back to ydotool if it fails (compositor may not support virtual keyboard)
@@ -114,17 +145,79 @@ pub fn paste() -> Result<()> {
     }
 }
 
-/// Paste using enigo (X11/libxdo)
+#[cfg(target_os = "windows")]
+fn paste_windows() -> Result<()> {
+    use std::time::Instant;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_SPACE, VK_V,
+    };
+
+    // Wait only when a key from the recording shortcut or another modifier is
+    // physically down, so the paste goes to the focused app as an ordinary Ctrl+V.
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let keys = [VK_CONTROL, VK_SPACE, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN];
+    while keys
+        .iter()
+        .any(|&key| unsafe { GetAsyncKeyState(i32::from(key)) } < 0)
+    {
+        if Instant::now() >= deadline {
+            return Err(AppError::Clipboard(
+                "Paste keys are still held; text is on the clipboard".to_string(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let key = |code, flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: code,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let input = [
+        key(VK_CONTROL, 0),
+        key(VK_V, 0),
+        key(VK_V, KEYEVENTF_KEYUP),
+        key(VK_CONTROL, KEYEVENTF_KEYUP),
+    ];
+    let size = std::mem::size_of::<INPUT>() as i32;
+    let sent = unsafe { SendInput(input.len() as u32, input.as_ptr(), size) };
+    if sent != input.len() as u32 {
+        if sent > 0 {
+            // Release any keys that may have been pressed by a partial send.
+            unsafe { SendInput(2, input[2..].as_ptr(), size) };
+        }
+        return Err(AppError::Clipboard(format!(
+            "Windows sent {sent} of {} paste events",
+            input.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Paste using enigo
+#[cfg(not(target_os = "windows"))]
 fn paste_enigo() -> Result<()> {
     use enigo::{Enigo, Keyboard, Settings};
 
     let mut enigo = Enigo::new(&Settings::default())
         .map_err(|e| AppError::Clipboard(format!("Failed to create input simulator: {}", e)))?;
 
-    // Simulate Ctrl+V
+    #[cfg(target_os = "macos")]
+    let modifier_key = enigo::Key::Meta;
+    #[cfg(not(target_os = "macos"))]
+    let modifier_key = enigo::Key::Control;
+
     enigo
-        .key(enigo::Key::Control, enigo::Direction::Press)
-        .map_err(|e| AppError::Clipboard(format!("Failed to press Ctrl: {}", e)))?;
+        .key(modifier_key, enigo::Direction::Press)
+        .map_err(|e| AppError::Clipboard(format!("Failed to press modifier key: {}", e)))?;
 
     thread::sleep(Duration::from_millis(20));
 
@@ -135,10 +228,10 @@ fn paste_enigo() -> Result<()> {
     thread::sleep(Duration::from_millis(20));
 
     enigo
-        .key(enigo::Key::Control, enigo::Direction::Release)
-        .map_err(|e| AppError::Clipboard(format!("Failed to release Ctrl: {}", e)))?;
+        .key(modifier_key, enigo::Direction::Release)
+        .map_err(|e| AppError::Clipboard(format!("Failed to release modifier key: {}", e)))?;
 
-    log::info!("Paste completed (enigo/X11)");
+    log::info!("Paste completed (enigo)");
     Ok(())
 }
 
@@ -190,6 +283,9 @@ pub fn type_text(text: &str) -> Result<()> {
     let backend = detect_backend();
 
     match backend {
+        #[cfg(target_os = "windows")]
+        PasteBackend::Windows => type_text_enigo(text),
+        #[cfg(not(target_os = "windows"))]
         PasteBackend::Enigo => type_text_enigo(text),
         PasteBackend::Wtype => {
             // Try wtype first, fall back to ydotool
@@ -207,7 +303,9 @@ pub fn type_text(text: &str) -> Result<()> {
         PasteBackend::Ydotool => type_text_ydotool(text),
         PasteBackend::ClipboardOnly => {
             log::info!("No type backend available");
-            Err(AppError::Clipboard("No typing backend available".to_string()))
+            Err(AppError::Clipboard(
+                "No typing backend available".to_string(),
+            ))
         }
     }
 }
@@ -298,8 +396,15 @@ pub fn get_paste_info() -> PasteInfo {
         type_supported: backend != PasteBackend::ClipboardOnly,
         clipboard_supported: true,
         notes: match backend {
-            PasteBackend::Enigo => "Using enigo (X11). Full paste simulation supported.".to_string(),
-            PasteBackend::Wtype => "Using wtype (Wayland). Full paste simulation supported.".to_string(),
+            #[cfg(target_os = "windows")]
+            PasteBackend::Windows => {
+                "Using Windows SendInput. Paste and typing are supported.".to_string()
+            }
+            #[cfg(not(target_os = "windows"))]
+            PasteBackend::Enigo => "Using enigo. Full paste simulation supported.".to_string(),
+            PasteBackend::Wtype => {
+                "Using wtype (Wayland). Full paste simulation supported.".to_string()
+            }
             PasteBackend::Ydotool => "Using ydotool. Full paste simulation supported.".to_string(),
             PasteBackend::ClipboardOnly => {
                 if is_wayland {
@@ -341,16 +446,9 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_backend() {
-        let backend = detect_backend();
-        // Just ensure it returns something valid
-        assert!(matches!(
-            backend,
-            PasteBackend::Enigo
-                | PasteBackend::Wtype
-                | PasteBackend::Ydotool
-                | PasteBackend::ClipboardOnly
-        ));
+    #[cfg(target_os = "windows")]
+    fn windows_uses_native_paste() {
+        assert_eq!(detect_backend(), PasteBackend::Windows);
     }
 
     #[test]

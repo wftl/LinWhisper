@@ -7,7 +7,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use hound::{SampleFormat as HoundSampleFormat, WavSpec, WavWriter};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Audio sample rate for whisper.cpp (16kHz required)
@@ -66,10 +66,10 @@ pub struct RecordingHandle {
     samples: Arc<Mutex<Vec<f32>>>,
     /// Recording flag
     is_recording: Arc<AtomicBool>,
-    /// Current audio level (RMS, 0.0 to 1.0)
-    current_level: Arc<Mutex<f32>>,
-    /// Peak level
-    peak_level: Arc<Mutex<f32>>,
+    /// Current audio level (RMS, 0.0 to 1.0) — stored as f32 bits for lock-free access
+    current_level: Arc<AtomicU32>,
+    /// Peak level — stored as f32 bits for lock-free access
+    peak_level: Arc<AtomicU32>,
 }
 
 impl RecordingHandle {
@@ -77,36 +77,37 @@ impl RecordingHandle {
         Self {
             samples: Arc::new(Mutex::new(Vec::new())),
             is_recording: Arc::new(AtomicBool::new(false)),
-            current_level: Arc::new(Mutex::new(0.0)),
-            peak_level: Arc::new(Mutex::new(0.0)),
+            current_level: Arc::new(AtomicU32::new(0)),
+            peak_level: Arc::new(AtomicU32::new(0)),
         }
     }
 
     pub fn is_recording(&self) -> bool {
-        self.is_recording.load(Ordering::SeqCst)
+        self.is_recording.load(Ordering::Acquire)
     }
 
-    pub fn set_recording(&self, recording: bool) {
-        self.is_recording.store(recording, Ordering::SeqCst);
-    }
-
-    pub fn clear_samples(&self) {
+    fn capture(&self, process: impl FnOnce() -> Vec<f32>) {
         if let Ok(mut samples) = self.samples.lock() {
-            samples.clear();
+            if self.is_recording() {
+                let processed = process();
+                self.update_level(&processed);
+                samples.extend(processed);
+            }
         }
     }
 
-    pub fn get_samples(&self) -> Vec<f32> {
-        self.samples.lock().map(|s| s.clone()).unwrap_or_default()
-    }
-
-    pub fn append_samples(&self, new_samples: Vec<f32>) {
-        if let Ok(mut samples) = self.samples.lock() {
-            samples.extend(new_samples);
+    fn finish(&self) -> Result<Vec<f32>> {
+        let mut samples = self
+            .samples
+            .lock()
+            .map_err(|_| AppError::Audio("Recording buffer is unavailable".to_string()))?;
+        if !self.is_recording.swap(false, Ordering::AcqRel) {
+            return Err(AppError::NoRecordingInProgress);
         }
+        Ok(std::mem::take(&mut *samples))
     }
 
-    /// Update audio level from new samples
+    /// Update audio level from new samples (lock-free, safe to call from audio callback)
     pub fn update_level(&self, new_samples: &[f32]) {
         if new_samples.is_empty() {
             return;
@@ -120,20 +121,21 @@ impl RecordingHandle {
         let level = (rms * 3.0).min(1.0);
 
         // Find peak
-        let peak = new_samples.iter().map(|s| s.abs()).fold(0.0f32, |a, b| a.max(b));
+        let peak = new_samples
+            .iter()
+            .map(|s| s.abs())
+            .fold(0.0f32, f32::max)
+            .min(1.0);
 
-        if let Ok(mut l) = self.current_level.lock() {
-            *l = level;
-        }
-        if let Ok(mut p) = self.peak_level.lock() {
-            *p = peak.min(1.0);
-        }
+        // Store as bit-pattern in AtomicU32 for lock-free access
+        self.current_level.store(level.to_bits(), Ordering::Relaxed);
+        self.peak_level.store(peak.to_bits(), Ordering::Relaxed);
     }
 
-    /// Get current audio level
+    /// Get current audio level (lock-free)
     pub fn get_level(&self) -> (f32, f32) {
-        let level = self.current_level.lock().map(|l| *l).unwrap_or(0.0);
-        let peak = self.peak_level.lock().map(|p| *p).unwrap_or(0.0);
+        let level = f32::from_bits(self.current_level.load(Ordering::Relaxed));
+        let peak = f32::from_bits(self.peak_level.load(Ordering::Relaxed));
         (level, peak)
     }
 }
@@ -145,20 +147,15 @@ impl Default for RecordingHandle {
 }
 
 /// Callback type for audio level updates
-pub type LevelCallback = Box<dyn Fn(f32) + Send + 'static>;
+pub type LevelCallback = Box<dyn Fn(f32, f32) + Send + 'static>;
 
 /// Start recording in a separate thread (returns immediately)
 /// The stream is managed in the spawned thread
 /// Optional level_callback is called with audio level (0.0-1.0) periodically
 pub fn start_recording(
-    handle: RecordingHandle,
     device_name: &str,
     level_callback: Option<LevelCallback>,
-) -> Result<()> {
-    if handle.is_recording() {
-        return Err(AppError::RecordingInProgress);
-    }
-
+) -> Result<RecordingHandle> {
     let device = get_device_by_name(device_name)?;
     let config = device.default_input_config()?;
 
@@ -170,12 +167,21 @@ pub fn start_recording(
         config.channels()
     );
 
-    handle.clear_samples();
-    handle.set_recording(true);
-
     let source_sample_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
     let sample_format = config.sample_format();
+    if !matches!(
+        sample_format,
+        SampleFormat::F32 | SampleFormat::I16 | SampleFormat::U16
+    ) {
+        return Err(AppError::Audio(format!(
+            "Unsupported sample format: {sample_format:?}"
+        )));
+    }
+
+    // A fresh handle prevents a previous stream from writing into a new recording.
+    let handle = RecordingHandle::new();
+    handle.is_recording.store(true, Ordering::Release);
     let handle_clone = handle.clone();
 
     // Spawn a thread to manage the stream (Stream is not Send)
@@ -186,94 +192,57 @@ pub fn start_recording(
 
         let stream_config: StreamConfig = config.into();
 
-        let samples_ref = handle_clone.samples.clone();
-        let is_recording_ref = handle_clone.is_recording.clone();
-        let level_handle = handle_clone.clone();
-        let level_handle2 = handle_clone.clone();
-        let level_handle3 = handle_clone.clone();
+        let capture = handle_clone.clone();
 
         let stream_result = match sample_format {
             SampleFormat::F32 => device.build_input_stream(
                 &stream_config,
                 move |data: &[f32], _: &_| {
-                    if is_recording_ref.load(Ordering::SeqCst) {
-                        let processed = process_audio_data(data, source_sample_rate, channels);
-                        level_handle.update_level(&processed);
-                        if let Ok(mut samples) = samples_ref.lock() {
-                            samples.extend(processed);
-                        }
-                    }
+                    capture.capture(|| process_audio_data(data, source_sample_rate, channels));
                 },
                 err_fn,
                 None,
             ),
-            SampleFormat::I16 => {
-                let samples_ref = handle_clone.samples.clone();
-                let is_recording_ref = handle_clone.is_recording.clone();
-                device.build_input_stream(
-                    &stream_config,
-                    move |data: &[i16], _: &_| {
-                        if is_recording_ref.load(Ordering::SeqCst) {
-                            let float_data: Vec<f32> =
-                                data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                            let processed = process_audio_data(&float_data, source_sample_rate, channels);
-                            level_handle2.update_level(&processed);
-                            if let Ok(mut samples) = samples_ref.lock() {
-                                samples.extend(processed);
-                            }
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-            }
-            SampleFormat::U16 => {
-                let samples_ref = handle_clone.samples.clone();
-                let is_recording_ref = handle_clone.is_recording.clone();
-                device.build_input_stream(
-                    &stream_config,
-                    move |data: &[u16], _: &_| {
-                        if is_recording_ref.load(Ordering::SeqCst) {
-                            let float_data: Vec<f32> = data
-                                .iter()
-                                .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
-                                .collect();
-                            let processed = process_audio_data(&float_data, source_sample_rate, channels);
-                            level_handle3.update_level(&processed);
-                            if let Ok(mut samples) = samples_ref.lock() {
-                                samples.extend(processed);
-                            }
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-            }
-            _ => {
-                log::error!("Unsupported sample format: {:?}", sample_format);
-                return;
-            }
+            SampleFormat::I16 => device.build_input_stream(
+                &stream_config,
+                move |data: &[i16], _: &_| {
+                    capture.capture(|| process_audio_data_i16(data, source_sample_rate, channels));
+                },
+                err_fn,
+                None,
+            ),
+            SampleFormat::U16 => device.build_input_stream(
+                &stream_config,
+                move |data: &[u16], _: &_| {
+                    capture.capture(|| process_audio_data_u16(data, source_sample_rate, channels));
+                },
+                err_fn,
+                None,
+            ),
+            _ => unreachable!("sample format already checked"),
         };
 
         match stream_result {
             Ok(stream) => {
                 if let Err(e) = stream.play() {
                     log::error!("Failed to play stream: {}", e);
-                    handle_clone.set_recording(false);
+                    let _ = handle_clone.finish();
                     return;
                 }
 
-                // Keep the thread alive while recording
-                // Also emit level updates via callback
+                // Keep the thread alive while recording.
+                // Also emit level/peak updates via callback.
                 let mut last_level_update = std::time::Instant::now();
                 while handle_clone.is_recording() {
                     std::thread::sleep(std::time::Duration::from_millis(30));
 
-                    // Emit level callback every ~100ms
-                    if last_level_update.elapsed() >= std::time::Duration::from_millis(100) {
+                    // Emit callbacks at ~12.5 Hz to keep UI responsive with low overhead.
+                    if handle_clone.is_recording()
+                        && last_level_update.elapsed() >= std::time::Duration::from_millis(80)
+                    {
                         if let Some(ref cb) = level_callback {
-                            let (level, _peak) = handle_clone.get_level();
-                            cb(level);
+                            let (level, peak) = handle_clone.get_level();
+                            cb(level, peak);
                         }
                         last_level_update = std::time::Instant::now();
                     }
@@ -284,26 +253,17 @@ pub fn start_recording(
             }
             Err(e) => {
                 log::error!("Failed to build stream: {}", e);
-                handle_clone.set_recording(false);
+                let _ = handle_clone.finish();
             }
         }
     });
 
-    Ok(())
+    Ok(handle)
 }
 
 /// Stop recording and return samples
 pub fn stop_recording(handle: &RecordingHandle) -> Result<Vec<f32>> {
-    if !handle.is_recording() {
-        return Err(AppError::NoRecordingInProgress);
-    }
-
-    handle.set_recording(false);
-
-    // Give the recording thread time to finish
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let samples = handle.get_samples();
+    let samples = handle.finish()?;
     log::info!("Recording stopped. {} samples captured", samples.len());
 
     Ok(samples)
@@ -318,7 +278,27 @@ fn process_audio_data(data: &[f32], source_rate: u32, channels: usize) -> Vec<f3
         .collect();
 
     // Simple linear resampling to 16kHz
-    resample(&mono, source_rate, WHISPER_SAMPLE_RATE)
+    resample_owned(mono, source_rate, WHISPER_SAMPLE_RATE)
+}
+
+fn process_audio_data_i16(data: &[i16], source_rate: u32, channels: usize) -> Vec<f32> {
+    let scale = 1.0 / i16::MAX as f32;
+    let mono: Vec<f32> = data
+        .chunks(channels)
+        .map(|chunk| chunk.iter().map(|&s| s as f32 * scale).sum::<f32>() / channels as f32)
+        .collect();
+
+    resample_owned(mono, source_rate, WHISPER_SAMPLE_RATE)
+}
+
+fn process_audio_data_u16(data: &[u16], source_rate: u32, channels: usize) -> Vec<f32> {
+    let scale = 2.0 / u16::MAX as f32;
+    let mono: Vec<f32> = data
+        .chunks(channels)
+        .map(|chunk| chunk.iter().map(|&s| s as f32 * scale - 1.0).sum::<f32>() / channels as f32)
+        .collect();
+
+    resample_owned(mono, source_rate, WHISPER_SAMPLE_RATE)
 }
 
 /// Simple linear interpolation resampling
@@ -347,6 +327,14 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     resampled
 }
 
+fn resample_owned(samples: Vec<f32>, from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if from_rate == to_rate {
+        samples
+    } else {
+        resample(&samples, from_rate, to_rate)
+    }
+}
+
 /// Save audio samples to a WAV file
 pub fn save_wav(samples: &[f32], path: &PathBuf) -> Result<()> {
     let spec = WavSpec {
@@ -358,10 +346,12 @@ pub fn save_wav(samples: &[f32], path: &PathBuf) -> Result<()> {
 
     let mut writer = WavWriter::create(path, spec)?;
 
-    for &sample in samples {
-        // Convert f32 [-1.0, 1.0] to i16
-        let sample_i16 = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        writer.write_sample(sample_i16)?;
+    for chunk in samples.chunks(WHISPER_SAMPLE_RATE as usize) {
+        let mut pcm = writer.get_i16_writer(chunk.len() as u32);
+        for &sample in chunk {
+            pcm.write_sample((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+        }
+        pcm.flush()?;
     }
 
     writer.finalize()?;
@@ -389,7 +379,7 @@ pub fn load_wav(path: &PathBuf) -> Result<Vec<f32>> {
 
     // Resample if necessary
     let samples = if spec.sample_rate != WHISPER_SAMPLE_RATE {
-        resample(&samples, spec.sample_rate, WHISPER_SAMPLE_RATE)
+        resample_owned(samples, spec.sample_rate, WHISPER_SAMPLE_RATE)
     } else {
         samples
     };
@@ -415,6 +405,35 @@ pub fn calculate_duration_ms(sample_count: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_takes_samples_and_late_callbacks_cannot_append() {
+        let handle = RecordingHandle::new();
+        handle.is_recording.store(true, Ordering::Release);
+        let callback = handle.clone();
+        callback.capture(|| vec![0.25, -0.5]);
+
+        assert_eq!(stop_recording(&handle).unwrap(), vec![0.25, -0.5]);
+        callback.capture(|| panic!("a stopped recording must reject late frames"));
+        assert!(matches!(
+            stop_recording(&handle),
+            Err(AppError::NoRecordingInProgress)
+        ));
+    }
+
+    #[test]
+    fn wav_writer_flushes_a_partial_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.wav");
+        let mut samples = vec![0.25; WHISPER_SAMPLE_RATE as usize];
+        samples.push(-0.5);
+        save_wav(&samples, &path).unwrap();
+        let decoded = load_wav(&path).unwrap();
+        assert_eq!(decoded.len(), samples.len());
+        for (actual, expected) in decoded.iter().zip(samples) {
+            assert!((actual - expected).abs() <= 2.0 / i16::MAX as f32);
+        }
+    }
 
     #[test]
     fn test_resample_same_rate() {

@@ -16,6 +16,7 @@ export default function SettingsPage() {
     anthropic: false,
   });
   const [saving, setSaving] = useState(false);
+  const [sttPreloadMessage, setSttPreloadMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (settings) {
@@ -33,9 +34,34 @@ export default function SettingsPage() {
   const handleSave = async () => {
     if (!localSettings) return;
 
+    const modelChanged =
+      !!settings &&
+      (settings.default_stt_provider !== localSettings.default_stt_provider ||
+        settings.default_stt_model !== localSettings.default_stt_model);
+
     setSaving(true);
+    setSttPreloadMessage(null);
     try {
       await updateSettings(localSettings);
+
+      if (modelChanged && localSettings.default_stt_provider === "whispercpp") {
+        setSttPreloadMessage(
+          `Loading model "${localSettings.default_stt_model}" now. This can take a moment...`
+        );
+        try {
+          await api.preloadSttModel(
+            localSettings.default_stt_provider,
+            localSettings.default_stt_model
+          );
+          setSttPreloadMessage(
+            `Model "${localSettings.default_stt_model}" is ready.`
+          );
+        } catch {
+          setSttPreloadMessage(
+            `Could not preload "${localSettings.default_stt_model}". It will load on first dictation.`
+          );
+        }
+      }
 
       // Save API keys if provided
       if (apiKeys.openai) {
@@ -166,8 +192,11 @@ export default function SettingsPage() {
               <option value="large-v3">large-v3 (best, multilingual)</option>
             </select>
             <p className="text-xs text-gray-500 mt-1">
-              Models are downloaded automatically on first use
+              Models are downloaded and loaded when saved
             </p>
+            {sttPreloadMessage && (
+              <p className="text-xs text-blue-300 mt-2">{sttPreloadMessage}</p>
+            )}
           </div>
         </div>
       </section>
@@ -341,7 +370,7 @@ export default function SettingsPage() {
           disabled={saving}
           className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
         >
-          {saving ? "Saving..." : "Save Settings"}
+          {saving ? "Saving / Loading..." : "Save Settings"}
         </button>
       </div>
     </div>

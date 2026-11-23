@@ -1,0 +1,91 @@
+html.recording-window,
+.recording-window body,
+.recording-window #root {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.recording-pill {
+  display: grid;
+  grid-template-columns: 34px 87px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 100%;
+  padding: 8px 12px;
+  overflow: hidden;
+  border: 1px solid #7463a17a;
+  border-radius: 20px;
+  background:
+    radial-gradient(ellipse at 9% 20%, #342350 0%, transparent 58%),
+    radial-gradient(ellipse at 100% 100%, #142b42 0%, transparent 65%),
+    #111225;
+  box-shadow: inset 0 1px 0 #ffffff0f;
+  user-select: none;
+}
+
+.recording-pill > * {
+  pointer-events: none;
+}
+
+.recording-pill__badge {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #ff8aba60;
+  border-radius: 12px;
+  background: #5b2b52;
+  color: #ffb5dd;
+  box-shadow: 0 0 12px #f66db326, inset 0 1px 0 #ffc3eb21;
+}
+
+.recording-pill__badge--processing {
+  border-color: #a895ff64;
+  background: #312c60;
+  color: #d2c8ff;
+  box-shadow: 0 0 12px #8b77fc36, inset 0 1px 0 #ddc9ff21;
+}
+
+.recording-pill__badge svg {
+  width: 21px;
+  height: 21px;
+}
+
+.recording-pill__text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.recording-pill__status {
+  color: #fbf7ff;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.15;
+}
+
+.recording-pill__shortcut {
+  color: #c2bbd1;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.recording-pill__shortcut kbd {
+  padding: 1px 2px;
+  border-radius: 3px;
+  background: #ffffff12;
+  font: inherit;
+}
+
+.recording-pill__wave {
+  display: block;
+  width: 100%;
+  height: 36px;
+  min-width: 0;
+}

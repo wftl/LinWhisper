@@ -1,7 +1,7 @@
 {
   "name": "whispertray",
   "version": "0.1.0",
-  "description": "A tray-based dictation tool for Linux with local STT and optional AI processing",
+  "description": "A tray-based dictation tool for Windows with local STT and optional AI processing",
   "type": "module",
   "scripts": {
     "dev": "vite",

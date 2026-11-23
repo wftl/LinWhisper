@@ -1,11 +1,14 @@
 [package]
 name = "whispertray"
 version = "0.1.0"
-description = "A tray-based dictation tool for Linux"
+description = "A tray-based dictation tool for desktop with local STT"
 authors = ["WhisperTray Contributors"]
 license = "MIT"
 repository = ""
 edition = "2021"
+
+[features]
+cuda = ["whisper-rs/cuda"]
 
 [lib]
 name = "whispertray_lib"
@@ -77,14 +80,11 @@ keyring = "2"
 arboard = "3"
 enigo = "0.2"
 
-# X11/Wayland window info
-xcb = { version = "1", optional = true }
-wayland-client = { version = "0.31", optional = true }
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
-[features]
-default = ["x11"]
-x11 = ["xcb"]
-wayland = ["wayland-client"]
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 strip = true

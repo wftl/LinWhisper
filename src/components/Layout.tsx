@@ -92,7 +92,7 @@ export default function Layout({ children }: LayoutProps) {
 
       {/* Footer */}
       <footer className="bg-gray-800 border-t border-gray-700 px-4 py-2 text-center text-xs text-gray-500">
-        WhisperTray v0.1.0 • Local-first voice transcription
+        WinWhisper v0.1.0 • Local-first voice transcription
       </footer>
     </div>
   );

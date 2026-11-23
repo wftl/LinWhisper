@@ -85,6 +85,13 @@ export async function updateSettings(settings: Settings): Promise<void> {
   return invoke("update_settings", { settings });
 }
 
+export async function preloadSttModel(
+  provider: string,
+  model: string
+): Promise<void> {
+  return invoke("preload_stt_model", { provider, model });
+}
+
 // API Keys
 export async function saveApiKey(provider: string, key: string): Promise<void> {
   return invoke("save_api_key", { provider, key });

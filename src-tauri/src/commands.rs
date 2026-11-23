@@ -2,11 +2,21 @@
 
 use crate::audio::{get_input_devices as get_audio_devices, AudioDevice};
 use crate::database::HistoryItem;
-use crate::modes::Mode;
-use crate::state::{RecordingStatus, Settings, SharedState};
-use crate::tray::{update_tray_icon, update_tray_menu};
+use crate::indicator::{emit_audio_level, emit_processing, show_indicator};
+use crate::modes::{Mode, SttProvider};
+use crate::state::{complete_recording, AppState, RecordingStatus, Settings, SharedState};
+use crate::tray::{update_tray_icon, update_tray_icon_for_level, update_tray_menu};
 use serde::{Deserialize, Serialize};
 use tauri::State;
+
+fn parse_stt_provider(provider: &str) -> SttProvider {
+    match provider.trim().to_lowercase().as_str() {
+        "whispercpp" => SttProvider::WhisperCpp,
+        "deepgram" => SttProvider::Deepgram,
+        "openai" => SttProvider::OpenAI,
+        other => SttProvider::Custom(other.to_string()),
+    }
+}
 
 /// Recording status response
 #[derive(Debug, Serialize)]
@@ -21,9 +31,19 @@ pub async fn start_recording(
     state: State<'_, SharedState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let mut state = state.lock().await;
+    let mut state = state.0.lock().await;
 
-    state.start_recording().map_err(|e| e.to_string())?;
+    let handle_for_callback = app_handle.clone();
+    let level_callback: crate::audio::LevelCallback = Box::new(move |level, peak| {
+        let _ = update_tray_icon_for_level(&handle_for_callback, level);
+        emit_audio_level(&handle_for_callback, level, peak);
+    });
+
+    state
+        .start_recording_with_callback(Some(level_callback))
+        .map_err(|e| e.to_string())?;
+    let _ = show_indicator(&app_handle);
+    emit_processing(&app_handle, false);
     update_tray_icon(&app_handle, RecordingStatus::Recording).map_err(|e| e.to_string())?;
     update_tray_menu(&app_handle, &state)
         .await
@@ -38,18 +58,9 @@ pub async fn stop_recording(
     state: State<'_, SharedState>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let mut state = state.lock().await;
-
-    update_tray_icon(&app_handle, RecordingStatus::Processing).map_err(|e| e.to_string())?;
-
-    let result = state.stop_recording().await.map_err(|e| e.to_string())?;
-
-    update_tray_icon(&app_handle, RecordingStatus::Ready).map_err(|e| e.to_string())?;
-    update_tray_menu(&app_handle, &state)
+    complete_recording(&state, &app_handle)
         .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(result)
+        .map_err(Into::into)
 }
 
 /// Get current recording status
@@ -57,7 +68,7 @@ pub async fn stop_recording(
 pub async fn get_recording_status(
     state: State<'_, SharedState>,
 ) -> Result<RecordingStatusResponse, String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
 
     Ok(RecordingStatusResponse {
         status: state.status,
@@ -68,7 +79,7 @@ pub async fn get_recording_status(
 /// Get all available modes
 #[tauri::command]
 pub async fn get_modes(state: State<'_, SharedState>) -> Result<Vec<Mode>, String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
     Ok(state.modes.values().cloned().collect())
 }
 
@@ -79,9 +90,11 @@ pub async fn set_active_mode(
     app_handle: tauri::AppHandle,
     mode_key: String,
 ) -> Result<(), String> {
-    let mut state = state.lock().await;
+    let mut state = state.0.lock().await;
 
-    state.set_active_mode(&mode_key).map_err(|e| e.to_string())?;
+    state
+        .set_active_mode(&mode_key)
+        .map_err(|e| e.to_string())?;
     update_tray_menu(&app_handle, &state)
         .await
         .map_err(|e| e.to_string())?;
@@ -92,14 +105,20 @@ pub async fn set_active_mode(
 /// Get the active mode
 #[tauri::command]
 pub async fn get_active_mode(state: State<'_, SharedState>) -> Result<Option<Mode>, String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
     Ok(state.get_active_mode().cloned())
 }
 
 /// Get available input devices
 #[tauri::command]
 pub async fn get_input_devices() -> Result<Vec<AudioDevice>, String> {
-    get_audio_devices().map_err(|e| e.to_string())
+    match get_audio_devices() {
+        Ok(devices) => Ok(devices),
+        Err(e) => {
+            log::warn!("Failed to enumerate input devices: {}", e);
+            Ok(Vec::new())
+        }
+    }
 }
 
 /// Set the input device
@@ -109,7 +128,7 @@ pub async fn set_input_device(
     app_handle: tauri::AppHandle,
     device_name: String,
 ) -> Result<(), String> {
-    let mut state = state.lock().await;
+    let mut state = state.0.lock().await;
 
     state.settings.input_device = device_name;
     state.save_settings().map_err(|e| e.to_string())?;
@@ -128,37 +147,34 @@ pub async fn transcribe_file(
     app_handle: tauri::AppHandle,
     file_path: String,
 ) -> Result<String, String> {
-    let state_guard = state.lock().await;
+    let (mode, language, cache) = {
+        let state = state.0.lock().await;
+        let mode = state.get_active_mode().cloned().ok_or("No active mode")?;
+        update_tray_icon(&app_handle, RecordingStatus::Processing)?;
+        (
+            mode,
+            state.settings.language.clone(),
+            state.stt_provider_cache.clone(),
+        )
+    };
 
-    update_tray_icon(&app_handle, RecordingStatus::Processing).map_err(|e| e.to_string())?;
-
-    // Load audio from file
-    let path = std::path::PathBuf::from(&file_path);
-    let samples = crate::audio::load_wav(&path).map_err(|e| e.to_string())?;
-
-    // Get active mode
-    let mode = state_guard
-        .get_active_mode()
-        .cloned()
-        .ok_or_else(|| "No active mode".to_string())?;
-
-    let language = state_guard.settings.language.clone();
-    drop(state_guard);
-
-    // Transcribe
-    let provider =
-        crate::providers::stt::create_stt_provider(&mode.stt_provider, &mode.stt_model)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    let transcript = provider
-        .transcribe(&samples, Some(&language))
+    let result = async {
+        let samples = tokio::task::spawn_blocking(move || {
+            crate::audio::load_wav(&std::path::PathBuf::from(file_path))
+        })
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())??;
+        let provider = cache.get(&mode.stt_provider, &mode.stt_model).await?;
+        provider
+            .transcribe(std::sync::Arc::new(samples), Some(&language))
+            .await
+            .map_err(String::from)
+    }
+    .await;
 
-    update_tray_icon(&app_handle, RecordingStatus::Ready).map_err(|e| e.to_string())?;
-
-    Ok(transcript)
+    let state = state.0.lock().await;
+    let _ = update_tray_icon(&app_handle, state.status);
+    result
 }
 
 /// History query parameters
@@ -175,7 +191,7 @@ pub async fn get_history(
     state: State<'_, SharedState>,
     query: Option<HistoryQuery>,
 ) -> Result<Vec<HistoryItem>, String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
 
     let db = state
         .database
@@ -205,7 +221,7 @@ pub async fn get_history_item(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<Option<HistoryItem>, String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
 
     let db = state
         .database
@@ -224,7 +240,7 @@ pub async fn reprocess_history_item(
     id: String,
     mode_key: String,
 ) -> Result<String, String> {
-    let state_guard = state.lock().await;
+    let state_guard = state.0.lock().await;
 
     update_tray_icon(&app_handle, RecordingStatus::Processing).map_err(|e| e.to_string())?;
 
@@ -251,8 +267,8 @@ pub async fn reprocess_history_item(
         .ok_or_else(|| "Mode not found".to_string())?;
 
     let language = state_guard.settings.language.clone();
-    let api_key = state_guard.get_api_key(&mode.llm_provider).map_err(|e| e.to_string())?;
     drop(state_guard);
+    let api_key = AppState::get_api_key(&mode.llm_provider).map_err(|e| e.to_string())?;
 
     // Reprocess
     let output = if mode.ai_processing && !mode.prompt_template.is_empty() {
@@ -270,7 +286,10 @@ pub async fn reprocess_history_item(
             &language,
         );
 
-        provider.complete(&prompt).await.map_err(|e| e.to_string())?
+        provider
+            .complete(&prompt)
+            .await
+            .map_err(|e| e.to_string())?
     } else {
         item.transcript_raw.clone()
     };
@@ -289,7 +308,7 @@ pub async fn reprocess_history_item(
         None
     };
 
-    let state_guard = state.lock().await;
+    let state_guard = state.0.lock().await;
     let db = state_guard
         .database
         .as_ref()
@@ -308,7 +327,7 @@ pub async fn reprocess_history_item(
 /// Delete a history item
 #[tauri::command]
 pub async fn delete_history_item(state: State<'_, SharedState>, id: String) -> Result<(), String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
 
     let db = state
         .database
@@ -345,7 +364,7 @@ pub async fn export_history_item(
     id: String,
     format: ExportFormat,
 ) -> Result<String, String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
 
     let db = state
         .database
@@ -395,7 +414,7 @@ pub async fn export_history_item(
 /// Get current settings
 #[tauri::command]
 pub async fn get_settings(state: State<'_, SharedState>) -> Result<Settings, String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
     Ok(state.settings.clone())
 }
 
@@ -405,9 +424,25 @@ pub async fn update_settings(
     state: State<'_, SharedState>,
     settings: Settings,
 ) -> Result<(), String> {
-    let mut state = state.lock().await;
+    let mut state = state.0.lock().await;
     state.settings = settings;
     state.save_settings().map_err(|e| e.to_string())
+}
+
+/// Preload an STT model/provider so first dictation has less latency.
+#[tauri::command]
+pub async fn preload_stt_model(
+    state: State<'_, SharedState>,
+    provider: String,
+    model: String,
+) -> Result<(), String> {
+    let provider_type = parse_stt_provider(&provider);
+    let cache = state.0.lock().await.stt_provider_cache.clone();
+    cache
+        .get(&provider_type, &model)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Save an API key
@@ -417,20 +452,22 @@ pub async fn save_api_key(
     provider: String,
     key: String,
 ) -> Result<(), String> {
-    let state = state.lock().await;
-    state.save_api_key(&provider, &key).map_err(|e| e.to_string())
+    let state = state.0.lock().await;
+    state
+        .save_api_key(&provider, &key)
+        .map_err(|e| e.to_string())
 }
 
 /// Delete an API key
 #[tauri::command]
 pub async fn delete_api_key(state: State<'_, SharedState>, provider: String) -> Result<(), String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
     state.delete_api_key(&provider).map_err(|e| e.to_string())
 }
 
 /// Check if an API key exists
 #[tauri::command]
 pub async fn has_api_key(state: State<'_, SharedState>, provider: String) -> Result<bool, String> {
-    let state = state.lock().await;
+    let state = state.0.lock().await;
     Ok(state.has_api_key(&provider))
 }

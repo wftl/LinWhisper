@@ -1,13 +1,20 @@
 //! System tray management
 
-use crate::error::Result;
-use crate::state::{AppState, RecordingStatus};
+use crate::error::{AppError, Result};
+use crate::indicator::{emit_audio_level, emit_processing, show_indicator};
+use crate::state::{complete_recording, AppState, RecordingStatus, SharedState};
 use log::info;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{image::Image, AppHandle, Emitter, Manager};
 
 const TRAY_ID: &str = "main-tray";
+const ICON_UNKNOWN_BUCKET: u8 = 255;
+static LAST_LEVEL_BUCKET: AtomicU8 = AtomicU8::new(ICON_UNKNOWN_BUCKET);
+static ICON_CACHE: OnceLock<HashMap<&'static str, Image<'static>>> = OnceLock::new();
 
 /// Set up the system tray
 pub fn setup_tray(app: &tauri::App) -> Result<()> {
@@ -25,7 +32,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<()> {
     let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .menu(&menu)
-        .tooltip("WhisperTray - Click to record")
+        .tooltip("WinWhisper - Click to record")
         .on_menu_event(move |app, event| {
             handle_menu_event(app, event.id.as_ref());
         })
@@ -54,7 +61,10 @@ fn build_tray_menu(handle: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>> 
         .separator()
         .item(
             &SubmenuBuilder::with_id(handle, "modes", "Mode")
-                .item(&MenuItemBuilder::with_id("mode_voice_to_text", "Voice to Text").build(handle)?)
+                .item(
+                    &MenuItemBuilder::with_id("mode_voice_to_text", "Voice to Text")
+                        .build(handle)?,
+                )
                 .build()?,
         )
         .item(
@@ -102,8 +112,8 @@ pub async fn update_tray_menu(handle: &AppHandle, state: &AppState) -> Result<()
     } else {
         "Default"
     };
-    devices_builder =
-        devices_builder.item(&MenuItemBuilder::with_id("device_default", default_label).build(handle)?);
+    devices_builder = devices_builder
+        .item(&MenuItemBuilder::with_id("device_default", default_label).build(handle)?);
 
     for device in devices {
         let id = format!("device_{}", device.name.replace(' ', "_"));
@@ -112,7 +122,8 @@ pub async fn update_tray_menu(handle: &AppHandle, state: &AppState) -> Result<()
         } else {
             device.name.clone()
         };
-        devices_builder = devices_builder.item(&MenuItemBuilder::with_id(&id, &label).build(handle)?);
+        devices_builder =
+            devices_builder.item(&MenuItemBuilder::with_id(&id, &label).build(handle)?);
     }
 
     let devices_menu = devices_builder.build()?;
@@ -147,6 +158,9 @@ pub async fn update_tray_menu(handle: &AppHandle, state: &AppState) -> Result<()
 
 /// Update the tray icon based on status
 pub fn update_tray_icon(handle: &AppHandle, status: RecordingStatus) -> Result<()> {
+    // Force icon refresh on next level tick.
+    LAST_LEVEL_BUCKET.store(ICON_UNKNOWN_BUCKET, Ordering::Relaxed);
+
     let icon_name = status.icon_name();
     let icon = load_tray_icon(icon_name)?;
 
@@ -154,11 +168,11 @@ pub fn update_tray_icon(handle: &AppHandle, status: RecordingStatus) -> Result<(
         tray.set_icon(Some(icon))?;
 
         let tooltip = match status {
-            RecordingStatus::Loading => "WhisperTray - Loading model...",
-            RecordingStatus::Recording => "WhisperTray - Recording...",
-            RecordingStatus::Processing => "WhisperTray - Processing...",
-            RecordingStatus::Ready => "WhisperTray - Ready (click to record)",
-            RecordingStatus::Error => "WhisperTray - Error",
+            RecordingStatus::Loading => "WinWhisper - Loading model...",
+            RecordingStatus::Recording => "WinWhisper - Recording...",
+            RecordingStatus::Processing => "WinWhisper - Processing...",
+            RecordingStatus::Ready => "WinWhisper - Ready (click to record)",
+            RecordingStatus::Error => "WinWhisper - Error",
         };
         tray.set_tooltip(Some(tooltip))?;
     }
@@ -169,19 +183,21 @@ pub fn update_tray_icon(handle: &AppHandle, status: RecordingStatus) -> Result<(
 /// Update the tray icon based on audio level (during recording)
 /// level: 0.0 to 1.0
 pub fn update_tray_icon_for_level(handle: &AppHandle, level: f32) -> Result<()> {
-    // Map level to color:
-    // Low (< 0.2): red (recording but quiet)
-    // Medium (0.2-0.5): yellow
-    // High (> 0.5): green (good level)
-    let icon_name = if level < 0.15 {
-        "tray-red"      // Very quiet / no input
+    // Map level to coarse buckets so we avoid redundant icon swaps.
+    let (bucket, icon_name) = if level < 0.15 {
+        (0u8, "tray-red")
     } else if level < 0.3 {
-        "tray-yellow"   // Low level
+        (1u8, "tray-yellow")
     } else if level < 0.6 {
-        "tray-green"    // Good level
+        (2u8, "tray-green")
     } else {
-        "tray-blue"     // High level (maybe too loud)
+        (3u8, "tray-blue")
     };
+
+    let previous = LAST_LEVEL_BUCKET.swap(bucket, Ordering::Relaxed);
+    if previous == bucket {
+        return Ok(());
+    }
 
     let icon = load_tray_icon(icon_name)?;
 
@@ -194,16 +210,41 @@ pub fn update_tray_icon_for_level(handle: &AppHandle, level: f32) -> Result<()> 
 
 /// Load a tray icon by name
 fn load_tray_icon(name: &str) -> Result<Image<'static>> {
-    // For now, we'll use colored PNGs
-    let icon_bytes = match name {
-        "tray-yellow" => include_bytes!("../icons/tray-yellow.png").to_vec(),
-        "tray-red" => include_bytes!("../icons/tray-red.png").to_vec(),
-        "tray-blue" => include_bytes!("../icons/tray-blue.png").to_vec(),
-        "tray-green" => include_bytes!("../icons/tray-green.png").to_vec(),
-        _ => include_bytes!("../icons/tray-green.png").to_vec(),
-    };
+    let cache = ICON_CACHE.get_or_init(|| {
+        let mut map = HashMap::new();
+        let entries = [
+            (
+                "tray-yellow",
+                include_bytes!("../icons/tray-yellow.png").as_slice(),
+            ),
+            (
+                "tray-red",
+                include_bytes!("../icons/tray-red.png").as_slice(),
+            ),
+            (
+                "tray-blue",
+                include_bytes!("../icons/tray-blue.png").as_slice(),
+            ),
+            (
+                "tray-green",
+                include_bytes!("../icons/tray-green.png").as_slice(),
+            ),
+        ];
 
-    Image::from_bytes(&icon_bytes).map_err(|e| crate::error::AppError::Tauri(e.to_string()))
+        for (key, bytes) in entries {
+            if let Ok(icon) = Image::from_bytes(bytes) {
+                map.insert(key, icon);
+            }
+        }
+
+        map
+    });
+
+    cache
+        .get(name)
+        .or_else(|| cache.get("tray-green"))
+        .cloned()
+        .ok_or_else(|| crate::error::AppError::Tauri("Tray icon cache is empty".to_string()))
 }
 
 /// Handle menu events
@@ -217,19 +258,8 @@ fn handle_menu_event(handle: &AppHandle, id: &str) {
         "stop_recording" => {
             let handle = handle.clone();
             tauri::async_runtime::spawn(async move {
-                if let Some(state) = handle.try_state::<crate::state::SharedState>() {
-                    let mut state = state.lock().await;
-                    if state.is_recording() {
-                        match state.stop_recording().await {
-                            Ok(output) => {
-                                info!("Recording stopped. Output: {} chars", output.len());
-                                let _ = update_tray_icon(&handle, RecordingStatus::Ready);
-                            }
-                            Err(e) => {
-                                log::error!("Failed to stop recording: {}", e);
-                            }
-                        }
-                    }
+                if let Some(state) = handle.try_state::<SharedState>() {
+                    finish_tray_recording(&handle, &state).await;
                 }
             });
         }
@@ -270,7 +300,7 @@ fn handle_menu_event(handle: &AppHandle, id: &str) {
                 let mode_key = mode_key.to_string();
                 tauri::async_runtime::spawn(async move {
                     if let Some(state) = handle.try_state::<crate::state::SharedState>() {
-                        let mut state = state.lock().await;
+                        let mut state = state.0.lock().await;
                         if let Err(e) = state.set_active_mode(&mode_key) {
                             log::error!("Failed to set mode: {}", e);
                         } else {
@@ -290,7 +320,7 @@ fn handle_menu_event(handle: &AppHandle, id: &str) {
                 };
                 tauri::async_runtime::spawn(async move {
                     if let Some(state) = handle.try_state::<crate::state::SharedState>() {
-                        let mut state = state.lock().await;
+                        let mut state = state.0.lock().await;
                         state.settings.input_device = device_name.clone();
                         if let Err(e) = state.save_settings() {
                             log::error!("Failed to save settings: {}", e);
@@ -309,36 +339,38 @@ fn handle_menu_event(handle: &AppHandle, id: &str) {
 fn handle_tray_click(handle: &AppHandle) {
     let handle = handle.clone();
     tauri::async_runtime::spawn(async move {
-        if let Some(state) = handle.try_state::<crate::state::SharedState>() {
-            let mut state = state.lock().await;
+        if let Some(state) = handle.try_state::<SharedState>() {
+            let (is_recording, is_processing) = {
+                let state = state.0.lock().await;
+                (state.is_recording(), state.status == RecordingStatus::Processing)
+            };
+            if is_processing {
+                return;
+            }
 
-            if state.is_recording() {
-                // Stop recording
-                match state.stop_recording().await {
-                    Ok(output) => {
-                        info!("Recording stopped. Output: {} chars", output.len());
-                        let _ = update_tray_icon(&handle, RecordingStatus::Ready);
-                        let _ = update_tray_menu(&handle, &state).await;
-
-                        // Emit event to frontend
-                        let _ = handle.emit("recording-complete", &output);
-                    }
-                    Err(e) => {
-                        log::error!("Failed to stop recording: {}", e);
-                        let _ = update_tray_icon(&handle, RecordingStatus::Error);
-                    }
-                }
+            if is_recording {
+                finish_tray_recording(&handle, &state).await;
             } else {
                 // Start recording
-                match state.start_recording() {
+                let handle_for_callback = handle.clone();
+                let level_callback: crate::audio::LevelCallback = Box::new(move |level, peak| {
+                    let _ = update_tray_icon_for_level(&handle_for_callback, level);
+                    emit_audio_level(&handle_for_callback, level, peak);
+                });
+
+                let mut state_guard = state.0.lock().await;
+                match state_guard.start_recording_with_callback(Some(level_callback)) {
                     Ok(()) => {
                         info!("Recording started");
+                        let _ = show_indicator(&handle);
+                        emit_processing(&handle, false);
                         let _ = update_tray_icon(&handle, RecordingStatus::Recording);
-                        let _ = update_tray_menu(&handle, &state).await;
+                        let _ = update_tray_menu(&handle, &state_guard).await;
 
                         // Emit event to frontend
                         let _ = handle.emit("recording-started", ());
                     }
+                    Err(AppError::RecordingInProgress) => {}
                     Err(e) => {
                         log::error!("Failed to start recording: {}", e);
                         let _ = update_tray_icon(&handle, RecordingStatus::Error);
@@ -347,6 +379,17 @@ fn handle_tray_click(handle: &AppHandle) {
             }
         }
     });
+}
+
+async fn finish_tray_recording(handle: &AppHandle, state: &SharedState) {
+    match complete_recording(state, handle).await {
+        Ok(output) => {
+            info!("Recording stopped. Output: {} chars", output.len());
+            let _ = handle.emit("recording-complete", &output);
+        }
+        Err(AppError::NoRecordingInProgress) => {}
+        Err(e) => log::error!("Failed to stop recording: {}", e),
+    }
 }
 
 /// Show a window

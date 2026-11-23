@@ -3,14 +3,18 @@
 use crate::error::{AppError, Result};
 use crate::modes::SttProvider as SttProviderType;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use tokio::sync::OnceCell;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// STT provider trait
 #[async_trait]
 pub trait SttProvider: Send + Sync {
     /// Transcribe audio samples to text
-    async fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String>;
+    async fn transcribe(&self, samples: Arc<Vec<f32>>, language: Option<&str>) -> Result<String>;
 
     /// Get the provider name
     fn name(&self) -> &str;
@@ -18,34 +22,46 @@ pub trait SttProvider: Send + Sync {
 
 /// Local whisper.cpp provider
 pub struct WhisperCppProvider {
-    model_path: PathBuf,
+    context: Arc<Mutex<WhisperContext>>,
 }
 
 impl WhisperCppProvider {
     /// Create a new whisper.cpp provider
-    pub fn new(model_path: PathBuf) -> Self {
-        Self { model_path }
+    pub fn new(model_path: PathBuf) -> Result<Self> {
+        let params = WhisperContextParameters::default();
+        let ctx = WhisperContext::new_with_params(
+            model_path
+                .to_str()
+                .ok_or_else(|| AppError::Transcription("Invalid model path".to_string()))?,
+            params,
+        )
+        .map_err(|e| AppError::Transcription(format!("Failed to create context: {}", e)))?;
+
+        Ok(Self {
+            context: Arc::new(Mutex::new(ctx)),
+        })
     }
 }
 
 #[async_trait]
 impl SttProvider for WhisperCppProvider {
-    async fn transcribe(&self, samples: &[f32], language: Option<&str>) -> Result<String> {
-        let model_path = self.model_path.clone();
-        let samples = samples.to_vec();
+    async fn transcribe(&self, samples: Arc<Vec<f32>>, language: Option<&str>) -> Result<String> {
+        let context = self.context.clone();
         let language = language.map(|s| s.to_string());
 
         let result = tokio::task::spawn_blocking(move || {
-            // Create context for transcription
-            let params = WhisperContextParameters::default();
-            let ctx = WhisperContext::new_with_params(model_path.to_str().unwrap(), params)
-                .map_err(|e| AppError::Transcription(format!("Failed to create context: {}", e)))?;
+            let ctx = context.lock().map_err(|_| {
+                AppError::Transcription("Failed to lock whisper context".to_string())
+            })?;
 
             let mut state = ctx
                 .create_state()
                 .map_err(|e| AppError::Transcription(format!("Failed to create state: {}", e)))?;
 
             let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            // whisper.cpp defaults to four threads, even on CPUs with more cores.
+            let threads = thread::available_parallelism().map_or(4, |count| count.get().min(8));
+            params.set_n_threads(threads as i32);
 
             // Set language if specified
             if let Some(lang) = language.as_deref() {
@@ -66,9 +82,9 @@ impl SttProvider for WhisperCppProvider {
                 .map_err(|e| AppError::Transcription(format!("Transcription failed: {}", e)))?;
 
             // Collect segments
-            let num_segments = state.full_n_segments().map_err(|e| {
-                AppError::Transcription(format!("Failed to get segments: {}", e))
-            })?;
+            let num_segments = state
+                .full_n_segments()
+                .map_err(|e| AppError::Transcription(format!("Failed to get segments: {}", e)))?;
 
             let mut text = String::new();
             for i in 0..num_segments {
@@ -153,17 +169,63 @@ pub async fn create_stt_provider(
     match provider_type {
         SttProviderType::WhisperCpp => {
             let model_path = ensure_model(model).await?;
-            let provider = WhisperCppProvider::new(model_path);
+            let provider = tokio::task::spawn_blocking(move || WhisperCppProvider::new(model_path))
+                .await
+                .map_err(|e| {
+                    AppError::Transcription(format!("Model loading task failed: {e}"))
+                })??;
             Ok(Box::new(provider))
         }
-        SttProviderType::Deepgram => {
-            Err(AppError::Provider("Deepgram not yet implemented".to_string()))
-        }
-        SttProviderType::OpenAI => {
-            Err(AppError::Provider("OpenAI STT not yet implemented".to_string()))
-        }
+        SttProviderType::Deepgram => Err(AppError::Provider(
+            "Deepgram not yet implemented".to_string(),
+        )),
+        SttProviderType::OpenAI => Err(AppError::Provider(
+            "OpenAI STT not yet implemented".to_string(),
+        )),
         SttProviderType::Custom(name) => {
             Err(AppError::Provider(format!("Unknown provider: {}", name)))
+        }
+    }
+}
+
+type CachedProvider = Arc<OnceCell<Arc<dyn SttProvider>>>;
+
+#[derive(Clone, Default)]
+pub(crate) struct ProviderCache {
+    models: Arc<Mutex<HashMap<(SttProviderType, String), CachedProvider>>>,
+}
+
+impl ProviderCache {
+    pub(crate) async fn get(
+        &self,
+        provider_type: &SttProviderType,
+        model: &str,
+    ) -> Result<Arc<dyn SttProvider>> {
+        let cell = self
+            .models
+            .lock()
+            .map_err(|_| AppError::Provider("STT cache is unavailable".to_string()))?
+            .entry((provider_type.clone(), model.to_string()))
+            .or_default()
+            .clone();
+
+        let provider = cell
+            .get_or_try_init(|| async {
+                create_stt_provider(provider_type, model)
+                    .await
+                    .map(Arc::from)
+            })
+            .await?;
+        Ok(provider.clone())
+    }
+
+    pub(crate) async fn warm_installed(&self, provider_type: &SttProviderType, model: &str) {
+        if *provider_type == SttProviderType::WhisperCpp
+            && get_model_path(model).is_ok_and(|path| path.is_file())
+        {
+            if let Err(error) = self.get(provider_type, model).await {
+                log::warn!("Could not warm speech model {model}: {error}");
+            }
         }
     }
 }

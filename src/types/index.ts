@@ -58,6 +58,7 @@ export interface Settings {
   auto_paste: boolean;
   context_awareness: boolean;
   language: string;
+  first_run_completed: boolean;
 }
 
 // Recording status response
